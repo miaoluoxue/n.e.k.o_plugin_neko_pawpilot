@@ -521,6 +521,23 @@ def test_road_knowledge():
     assert "超车" in kb.game_tip("高速上怎么变道")
 
 
+def test_scenery_knowledge():
+    """风景/建筑/标识/NPC知识：看见什么聊什么，避免空洞反问。"""
+    from plugin.plugins.neko_pawpilot.core.knowledge import KnowledgeBase
+    kb = KnowledgeBase()
+    assert "风车" in kb.game_tip("路边风车好多")
+    assert "建筑" in kb.game_tip("前面是什么建筑")
+    assert "极光" in kb.game_tip("北欧有极光吗")      # 天气优先于 DLC
+    assert "鹿" in kb.game_tip("路上遇到鹿怎么办")
+    assert "风景" in kb.game_tip("这风景真漂亮")
+    assert "AI 车" in kb.game_tip("那些AI车怎么开的")  # 大小写不敏感
+    assert "彩虹" in kb.game_tip("路边有彩虹")
+    assert "地标" in kb.game_tip("埃菲尔铁塔在哪")
+    assert "动物" in kb.game_tip("路上有动物")
+    # 任意语句不返回 None（兜底有知识素材）
+    assert kb.game_tip("帮我看看油箱") is None  # 无关键词时 game_tip 本身返回 None
+
+
 def test_events_fire_without_job():
     """自由驾驶（无任务）时急刹/超速/撞车也必须触发事件。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
