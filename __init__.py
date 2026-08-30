@@ -116,23 +116,28 @@ class NekoPawpilotPlugin(NekoPluginBase):
     @plugin_entry(
         id="set_voice_style",
         name="切换播报口吻",
-        description="切换猫娘播报口吻：tsundere=傲娇/cold=冰山/chatty=话痨/gentle=温柔/playful=调皮/strict=严厉督导/quiet=安静/default=自然。玩家说傲娇点/话痨点/冷一点/凶一点时调用。",
+        description="设置猫娘播报口吻：支持多选融合（styles 数组）。可选：default=自然/tsundere=傲娇/yandere=病娇/loli=萝莉/onee=御姐/genki=元气/cold=冰山/chatty=话痨/gentle=温柔/playful=调皮/strict=严厉/quiet=安静/kuudere=三无/sister=妹系/ojousama=大小姐。玩家说傲娇点/话痨点/病娇一点/御姐音时调用，可组合如「傲娇+话痨」。",
         input_schema={"type": "object", "properties": {
-            "style": {"type": "string", "enum": ["default", "tsundere", "cold", "chatty", "gentle", "playful", "strict", "quiet"], "default": "default"},
+            "style": {"type": "string", "enum": ["default", "tsundere", "yandere", "loli", "onee", "genki", "cold", "chatty", "gentle", "playful", "strict", "quiet", "kuudere", "sister", "ojousama"], "default": "default"},
+            "styles": {"type": "array", "items": {"type": "string"}, "description": "多口吻融合列表"},
         }},
     )
-    async def action_set_voice_style(self, style: str = "default", **_) -> Any:
-        """切换口吻风格（真实生效：注入 prompt + 调整闲聊频率）。"""
+    async def action_set_voice_style(self, style: str = "default", styles=None, **_) -> Any:
+        """切换口吻风格（单值或多选融合，真实生效）。"""
         try:
             if not self.rt:
                 return Err(SdkError("猫爪副驾还没准备好喵"))
-            if not self.rt.persona.set_voice_style(style):
+            if styles and isinstance(styles, list):
+                if not self.rt.persona.set_voice_styles(styles):
+                    return Err(SdkError("无效的口吻组合喵"))
+            elif not self.rt.persona.set_voice_style(style):
                 return Err(SdkError("无效的口吻喵"))
             await self.rt.settings_save()
             v = self.rt.persona.snapshot()
-            return Ok({"reply": f"好的喵~ 接下来我用「{v.get('voice_label')}」口吻播报",
-                       "voice_style": style,
-                       "voice_label": v.get("voice_label")})
+            labels = "、".join(v.get("voice_labels", []))
+            return Ok({"reply": f"好的喵~ 接下来我用「{labels}」口吻播报",
+                       "voice_styles": v.get("voice_styles"),
+                       "voice_labels": v.get("voice_labels")})
         except Exception as exc:
             self.logger.warning("set_voice_style failed: %s", exc)
             return Err(SdkError("切换口吻失败喵"))

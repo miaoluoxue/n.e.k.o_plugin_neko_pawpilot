@@ -151,7 +151,7 @@ class PawpilotRuntime:
         data = self._ui_settings()
         data.update({
             "dry_run": self.cfg.dry_run,
-            "voice_style": self.persona.voice_style,
+            "voice_styles": list(self.persona.voice_styles),
             "broadcast_frequency": self.arbiter.broadcast_frequency,
             "broadcast_categories": dict(self.arbiter.broadcast_categories),
         })
@@ -169,9 +169,14 @@ class PawpilotRuntime:
         saved = self._ui_settings()
         if not saved:
             return
-        style = saved.get("voice_style")
-        if style:
-            self.persona.set_voice_style(style)
+        style = saved.get("voice_styles")
+        if isinstance(style, list) and style:
+            self.persona.set_voice_styles(style)
+        else:
+            # 兼容旧版单值 voice_style
+            old = saved.get("voice_style")
+            if old:
+                self.persona.set_voice_style(old)
         if "dry_run" in saved:
             self.set_dry_run(bool(saved["dry_run"]))
         if saved.get("broadcast_frequency"):
@@ -329,6 +334,8 @@ class PawpilotRuntime:
                 "description": self.persona.description,
                 "voice_style": self.persona.voice_style,
                 "voice_label": self.persona.snapshot().get("voice_label", ""),
+                "voice_styles": list(self.persona.voice_styles),
+                "voice_labels": self.persona.snapshot().get("voice_labels", []),
             },
             "memory": self.memory.snapshot(),
             "top_cities": self._top_entries("cities"),

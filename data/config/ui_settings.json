@@ -1,6 +1,8 @@
 {
   "dry_run": false,
-  "voice_style": "default",
+  "voice_styles": [
+    "default"
+  ],
   "broadcast_frequency": "active",
   "broadcast_categories": {
     "safety": true,

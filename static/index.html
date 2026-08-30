@@ -310,9 +310,11 @@ const SCENARIO_LABELS = {
 const FREQ_LABELS = { quiet:'安静', standard:'标准', active:'活跃' };
 const CAT_LABELS = { safety:'驾驶安全', task:'任务', trip:'旅程', lifecycle:'启停', chatter:'闲聊' };
 const VOICE_STYLES = [
-  { id:'default', label:'自然' }, { id:'tsundere', label:'傲娇' }, { id:'cold', label:'冰山' },
-  { id:'chatty', label:'话痨' }, { id:'gentle', label:'温柔' }, { id:'playful', label:'调皮' },
-  { id:'strict', label:'严厉督导' }, { id:'quiet', label:'安静' },
+  { id:'default', label:'自然' }, { id:'tsundere', label:'傲娇' }, { id:'yandere', label:'病娇' },
+  { id:'loli', label:'萝莉' }, { id:'onee', label:'御姐' }, { id:'genki', label:'元气少女' },
+  { id:'cold', label:'冰山' }, { id:'chatty', label:'话痨' }, { id:'gentle', label:'温柔' },
+  { id:'playful', label:'调皮' }, { id:'strict', label:'严厉' }, { id:'quiet', label:'安静' },
+  { id:'kuudere', label:'三无' }, { id:'sister', label:'妹系' }, { id:'ojousama', label:'大小姐' },
 ];
 
 function delay(ms) { return new Promise(r=>setTimeout(r,ms)); }
@@ -483,9 +485,9 @@ function renderSettings() {
     '<div class="s good">宿主导入</div><div class="desc">' +
     (traits || '宿主未配置人设特质') + '</div></div>' +
     (cg.description ? '<div class="desc" style="margin-top:6px">口头禅：' + cg.description + '</div>' : '');
-  var vs = (cg.voice_style || 'default');
+  var vss = (cg.voice_styles && cg.voice_styles.length) ? cg.voice_styles : [(cg.voice_style || 'default')];
   document.getElementById('voiceGroup').innerHTML = VOICE_STYLES.map(v =>
-    '<button class="mode-chip' + (v.id === vs ? ' active' : '') + '" onclick="setVoiceStyle(\'' + v.id + '\')">' + v.label + '</button>').join('');
+    '<button class="mode-chip' + (vss.indexOf(v.id) >= 0 ? ' active' : '') + '" onclick="toggleVoiceStyle(\'' + v.id + '\')">' + v.label + '</button>').join('');
   document.getElementById('dryRunLabel').textContent = s.dry_run ? '试运行（不真发）' : '正式播报';
   var paused = (s.safety || {}).status === 'paused' || (s.safety || {}).status === 'tripped';
   document.getElementById('pauseBtn').textContent = paused ? '恢复' : '急停';
@@ -541,10 +543,20 @@ async function testSay() {
   toast(r && r.pushed ? '测试消息已发出（dry_run 时仅记录）' : '测试开口失败', !(r && r.pushed));
 }
 
-async function setVoiceStyle(style) {
-  var r = await callEntry('set_voice_style', { style: style });
-  if (r && r.reply) toast(r.reply);
-  else toast('切换口吻失败', true);
+async function toggleVoiceStyle(style) {
+  var cg = (state.catgirl || {});
+  var cur = (cg.voice_styles && cg.voice_styles.length) ? cg.voice_styles.slice() : [(cg.voice_style || 'default')];
+  if (style === 'default') {
+    // 选自然 = 清空其他
+    await callEntry('set_voice_style', { styles: ['default'] });
+  } else {
+    var idx = cur.indexOf(style);
+    if (idx >= 0) cur.splice(idx, 1);       // 取消选中
+    else { cur = cur.filter(s => s !== 'default'); cur.push(style); }  // 选中并移除 default
+    if (!cur.length) cur = ['default'];
+    await callEntry('set_voice_style', { styles: cur });
+  }
+  toast('口吻已更新');
   setTimeout(loadState, 600);
 }
 

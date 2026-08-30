@@ -674,6 +674,33 @@ def test_voice_style_effects():
     assert p.voice_style == "strict"
 
 
+def test_voice_style_multi():
+    """多口吻融合：列表生效、prompt 合并、闲聊间隔取最小、无效过滤。"""
+    from plugin.plugins.neko_pawpilot.core.mood import Persona
+    p = Persona()
+    # 新语气可用
+    assert p.set_voice_style("yandere")
+    assert p.strict_mode  # 病娇严格模式
+    assert p.set_voice_style("loli")
+    assert p.set_voice_style("onee")
+    assert p.set_voice_style("genki")
+    # 多语气融合
+    assert p.set_voice_styles(["yandere", "chatty"])
+    assert p.voice_styles == ["yandere", "chatty"]
+    hint = p.persona_hint()
+    assert "病娇" in hint and "话痨" in hint  # prompt 合并
+    assert p.talk_interval == 420.0  # 取最活跃（话痨 420 < 病娇 600）
+    # 无效过滤
+    assert p.set_voice_styles(["loli", "bogus"])
+    assert p.voice_styles == ["loli"]
+    # 全无效拒绝
+    assert not p.set_voice_styles(["bogus1", "bogus2"])
+    # snapshot 输出列表
+    snap = p.snapshot()
+    assert snap["voice_styles"] == ["loli"]
+    assert snap["voice_labels"] == ["萝莉"]
+
+
 def test_cat_pilot_snatch_limit():
     """猫娘智驾：同会话 3 次抢夺后自动交还，重接不清零。"""
     from plugin.plugins.neko_pawpilot.core.pilot import CatPilot

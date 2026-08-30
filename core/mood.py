@@ -155,9 +155,9 @@ def _load_voice_styles() -> Dict[str, Dict[str, Any]]:
 
 
 class Persona:
-    """猫娘人格：宿主导入人设 + 口吻风格 + 情绪驱动。"""
+    """猫娘人格：宿主导入人设 + 多口吻融合 + 情绪驱动。"""
 
-    def __init__(self, host_persona: Any = None, voice_style: str = "default") -> None:
+    def __init__(self, host_persona: Any = None, voice_styles=None) -> None:
         hp = getattr(host_persona, "snapshot", None)
         data = hp() if callable(hp) else (host_persona or {})
         if not data:
@@ -168,26 +168,45 @@ class Persona:
         self.description = data.get("description", "")
         self.habits: dict = data.get("habits", {})
         self._voice_styles = _load_voice_styles()
-        self.voice_style = voice_style if voice_style in self._voice_styles else "default"
+        # 支持多语气：voice_styles 为列表（如 ["tsundere","chatty"]）
+        self.voice_styles = list(voice_styles) if voice_styles else ["default"]
+        self.voice_styles = [s for s in self.voice_styles if s in self._voice_styles] \
+            or ["default"]
         self.mood = Mood()
         self._rng = random.Random()
 
+    @property
+    def voice_style(self) -> str:
+        """兼容旧字段：返回主语气（第一个）。"""
+        return self.voice_styles[0]
+
     def set_voice_style(self, style: str) -> bool:
-        """切换口吻风格；无效返回 False。"""
+        """切换口吻风格（旧接口：单语气）。"""
         if style not in self._voice_styles:
             return False
-        self.voice_style = style
+        self.voice_styles = [style]
+        return True
+
+    def set_voice_styles(self, styles) -> bool:
+        """多语气融合：接受列表，无效项过滤，至少保留一个。"""
+        valid = [s for s in (styles or []) if s in self._voice_styles]
+        if not valid:
+            return False
+        self.voice_styles = valid
         return True
 
     @property
     def talk_interval(self) -> float:
-        """闲聊间隔（秒）：话痨短/冰山长。"""
-        return float(self._voice_styles.get(self.voice_style, {}).get("talk_interval", 900))
+        """闲聊间隔（秒）：多语气取最小值（最活跃的语气主导频率）。"""
+        vals = [float(self._voice_styles.get(s, {}).get("talk_interval", 900))
+                for s in self.voice_styles]
+        return min(vals) if vals else 900.0
 
     @property
     def strict_mode(self) -> bool:
-        """严厉督导模式：超速/急刹用训斥话术。"""
-        return bool(self._voice_styles.get(self.voice_style, {}).get("strict_mode", False))
+        """严厉督导模式：任一语气开启即生效。"""
+        return any(bool(self._voice_styles.get(s, {}).get("strict_mode", False))
+                   for s in self.voice_styles)
 
     def feel(self, emotion: str, intensity: float = 0.5) -> None:
         self.mood.trigger(emotion, intensity)
@@ -210,7 +229,7 @@ class Persona:
         return text
 
     def persona_hint(self) -> str:
-        """人设提示：主人设 + 口吻风格，注入 LLM 让宿主按此演绎。"""
+        """人设提示：主人设 + 多口吻融合，注入 LLM 让宿主按此演绎。"""
         parts = []
         if self.name:
             parts.append(f"你是{self.name}")
@@ -219,17 +238,23 @@ class Persona:
         if self.description:
             parts.append(f"口头禅：{self.description}")
         base = "，".join(parts) if parts else "你是猫娘"
-        style_prompt = (self._voice_styles.get(self.voice_style, {})
-                        .get("prompt", ""))
+        # 多语气 prompt 融合
+        prompts = [self._voice_styles.get(s, {}).get("prompt", "")
+                   for s in self.voice_styles]
+        prompts = [p for p in prompts if p]
+        style_prompt = " ".join(prompts) if prompts else ""
         return (f"{base}。称呼{self.user_call}为「{self.user_call}」"
                 f"（当前情绪：{self.mood.style().get('verbosity', '正常')}）。"
                 f"{style_prompt} 用这个身份以一句话回应驾驶情况，30字内，自然带语气词。")
 
     def snapshot(self) -> Dict[str, Any]:
-        v = self._voice_styles.get(self.voice_style, {})
+        labels = [self._voice_styles.get(s, {}).get("label", s)
+                  for s in self.voice_styles]
         return {"name": self.name, "user_call": self.user_call,
                 "traits": self.traits, "description": self.description,
-                "voice_style": self.voice_style,
-                "voice_label": v.get("label", self.voice_style),
+                "voice_style": self.voice_styles[0],
+                "voice_label": labels[0],
+                "voice_styles": self.voice_styles,
+                "voice_labels": labels,
                 "mood": self.mood.primary(), "emotions": self.mood.snapshot(),
                 "style": self.mood.style()}
