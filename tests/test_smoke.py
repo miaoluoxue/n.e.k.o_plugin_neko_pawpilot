@@ -701,6 +701,31 @@ def test_voice_style_multi():
     assert snap["voice_labels"] == ["萝莉"]
 
 
+def test_llm_fallback_chain():
+    """LLM 三级链路：未配置→None，配置→尝试调用，失败→自动降级。"""
+    import asyncio
+    from plugin.plugins.neko_pawpilot.adapters.llm_client import LLMProvider
+
+    async def _run():
+        p = LLMProvider()
+        # 未配置
+        assert not p.configured
+        assert await p.call("hi") is None
+        # 缺 model 不算配置
+        p.set_client("openai", "")
+        assert not p.configured
+        # 配置有效
+        p.set_client("openai_compatible", "test-model", "k", "http://127.0.0.1:9/v1")
+        assert p.configured
+        # 调用失败 → None（降级），记录错误
+        r = await p.call("你好")
+        assert r is None
+        assert p.snapshot()["last_error"]
+        return True
+
+    assert asyncio.run(_run())
+
+
 def test_cat_pilot_snatch_limit():
     """猫娘智驾：同会话 3 次抢夺后自动交还，重接不清零。"""
     from plugin.plugins.neko_pawpilot.core.pilot import CatPilot

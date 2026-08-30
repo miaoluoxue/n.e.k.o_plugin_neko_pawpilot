@@ -405,3 +405,30 @@ class NekoPawpilotPlugin(NekoPluginBase):
         except Exception as exc:
             self.logger.warning("talk entry failed: %s", exc)
             return Err(SdkError("回应失败喵"))
+
+    @plugin_entry(id="get_llm_config", name="获取LLM配置",
+                  description="读取猫爪副驾的自建 LLM 配置（provider/model/api_key/base_url）。",
+                  input_schema={"type": "object", "properties": {}},
+                  metadata={"agent_hidden": True})
+    async def entry_get_llm_config(self, **_) -> Any:
+        if not self.rt:
+            return Ok({"config": {}, "configured": False})
+        return Ok({"config": self.rt.llm_config(),
+                   "configured": self.rt.llm.configured,
+                   "stats": self.rt.llm.snapshot()})
+
+    @plugin_entry(id="save_llm_config", name="保存LLM配置",
+                  description="保存猫爪副驾自建 LLM 配置；留空则降级为模板/宿主演绎。",
+                  input_schema={"type": "object", "properties": {
+                      "config": {"type": "object", "description": "含 provider/model/api_key/base_url"},
+                  }},
+                  metadata={"agent_hidden": True})
+    async def entry_save_llm_config(self, config: dict = None, **_) -> Any:
+        try:
+            if not self.rt:
+                return Err(SdkError("猫爪副驾还没准备好喵"))
+            ok = await self.rt.save_llm_config(config or {})
+            return Ok({"saved": ok, "configured": self.rt.llm.configured})
+        except Exception as exc:
+            self.logger.warning("save_llm_config failed: %s", exc)
+            return Err(SdkError("保存 LLM 配置失败喵"))

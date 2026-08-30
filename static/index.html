@@ -292,6 +292,27 @@ body::before {
       <div class="btn-group" id="catGroup"></div>
       <div style="color:var(--text3);font-size:0.72rem;margin-top:11px;">关闭的类别不推送（危急驾驶安全始终保留）。</div>
     </div>
+    <div class="card">
+      <h2>🤖 LLM 配置 <span class="line"></span></h2>
+      <div style="color:var(--text3);font-size:0.72rem;margin-bottom:8px;" id="llmStatus">未配置（自动用模板/宿主演绎）</div>
+      <div class="config-field"><label>Provider</label>
+        <select id="llm-provider" style="width:100%;padding:7px;border-radius:8px;border:1px solid var(--border);background:var(--glass);color:var(--text);font-family:inherit;">
+          <option value="">（不配置）</option>
+          <option value="openai_compatible">OpenAI 兼容（DeepSeek/Ollama 等）</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="gemini">Gemini</option>
+        </select>
+      </div>
+      <div class="config-field" style="margin-top:8px;"><label>模型 Model</label><input id="llm-model" placeholder="如 deepseek-chat / gpt-4o / qwen2.5" style="width:100%;padding:7px;border-radius:8px;border:1px solid var(--border);background:var(--glass);color:var(--text);"></div>
+      <div class="config-field" style="margin-top:8px;"><label>API Key</label><input id="llm-api_key" type="password" placeholder="sk-...（本地可留空）" style="width:100%;padding:7px;border-radius:8px;border:1px solid var(--border);background:var(--glass);color:var(--text);"></div>
+      <div class="config-field" style="margin-top:8px;"><label>Base URL</label><input id="llm-base_url" placeholder="https://api.deepseek.com 或 http://127.0.0.1:11434/v1" style="width:100%;padding:7px;border-radius:8px;border:1px solid var(--border);background:var(--glass);color:var(--text);"></div>
+      <div class="btn-group" style="margin-top:10px;">
+        <button class="btn btn-accent" onclick="saveLlmConfig()">💾 保存 LLM 配置</button>
+        <button class="btn btn-ghost" onclick="clearLlmConfig()">🗑 清空（用模板）</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -497,6 +518,39 @@ function renderSettings() {
   var cats = s.broadcast_categories || {};
   document.getElementById('catGroup').innerHTML = Object.keys(cats).map(c =>
     '<button class="mode-chip' + (cats[c] ? ' active' : '') + '" onclick="toggleCategory(\'' + c + '\',' + cats[c] + ')">' + (CAT_LABELS[c] || c) + '</button>').join('');
+  loadLlmForm();
+}
+
+function loadLlmForm() {
+  callEntry('get_llm_config', {}).then(function(r) {
+    if (!r || !r.config) return;
+    var c = r.config || {};
+    var p = document.getElementById('llm-provider'); if (p) p.value = c.provider || '';
+    var m = document.getElementById('llm-model'); if (m) m.value = c.model || '';
+    var k = document.getElementById('llm-api_key'); if (k) k.value = c.api_key || '';
+    var b = document.getElementById('llm-base_url'); if (b) b.value = c.base_url || '';
+    var st = document.getElementById('llmStatus');
+    if (st) st.textContent = (r.configured ? ('✅ 已配置 ' + (c.provider || '') + '/' + (c.model || '') + '（优先用自建 LLM，失败自动降级）') : '未配置（自动用模板/宿主演绎）');
+  }).catch(function(){});
+}
+
+async function saveLlmConfig() {
+  var cfg = {
+    provider: document.getElementById('llm-provider').value,
+    model: document.getElementById('llm-model').value.trim(),
+    api_key: document.getElementById('llm-api_key').value.trim(),
+    base_url: document.getElementById('llm-base_url').value.trim()
+  };
+  var r = await callEntry('save_llm_config', { config: cfg });
+  if (r && r.saved) { toast(r.configured ? 'LLM 配置已保存，自建 LLM 优先' : '已保存（未填完整，将用模板降级）'); }
+  else toast('保存 LLM 配置失败', true);
+  loadLlmForm();
+}
+
+async function clearLlmConfig() {
+  var r = await callEntry('save_llm_config', { config: { provider:'', model:'', api_key:'', base_url:'' } });
+  toast('已清空 LLM 配置，用模板/宿主演绎');
+  loadLlmForm();
 }
 
 function render() {

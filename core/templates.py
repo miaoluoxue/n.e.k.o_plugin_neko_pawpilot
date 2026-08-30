@@ -77,10 +77,11 @@ def _load_templates() -> Dict[str, str]:
 
 
 class EmotionRenderer:
-    """事件 → 事实行 prompt 或短句。"""
+    """事件 → 事实行 prompt 或短句（LLM 优先，模板降级）。"""
 
-    def __init__(self, persona: Persona) -> None:
+    def __init__(self, persona: Persona, llm: Any = None) -> None:
         self.persona = persona
+        self._llm = llm
         self._short_lines = _load_templates()
         mood_path = Path(__file__).resolve().parent.parent / "data" / "config" / "mood.json"
         try:
@@ -90,6 +91,14 @@ class EmotionRenderer:
         self._mood_map: Dict[str, Dict[str, float]] = mood_data.get("event_mood", {})
         self._rng = random.Random()
 
+    async def fact_prompt_llm(self, event_name: str, **kw: Any) -> Optional[str]:
+        """LLM 渲染（配置了才调用），失败返回 None 由模板兜底。"""
+        if self._llm is None:
+            return None
+        fact = self._format(FACT_TEMPLATES.get(event_name, ""), event_name, **kw)
+        hint = self.persona.persona_hint()
+        return await self._llm.call(f"{fact}\n{hint}")
+
     def fact_prompt(self, event_name: str, **kw: Any) -> str:
         """respond 模式：事实行 + 人设要求行（宿主按当前人设展开）。"""
         self._apply_mood(event_name)
@@ -97,8 +106,17 @@ class EmotionRenderer:
         hint = self.persona.persona_hint()
         return f"{fact}\n{hint}"
 
+    async def short_line_llm(self, event_name: str, **kw: Any) -> Optional[str]:
+        """blind 短句：LLM 优先（配置了才调），失败返回 None 走模板。"""
+        if self._llm is None:
+            return None
+        fact = self._format(FACT_TEMPLATES.get(event_name, ""), event_name, **kw)
+        hint = self.persona.persona_hint()
+        text = await self._llm.call(f"{fact}\n{hint}（一句话，短，直出）")
+        return text if text else None
+
     def short_line(self, event_name: str, **kw: Any) -> str:
-        """blind 模式：直出短句。"""
+        """blind 模式：直出短句（模板）。"""
         self._apply_mood(event_name)
         text = self._format(self._short_lines.get(event_name, ""), event_name, **kw)
         return self.persona.polish(text)

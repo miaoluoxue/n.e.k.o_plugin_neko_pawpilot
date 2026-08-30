@@ -31,6 +31,7 @@ from ..adapters.push_sender import PushSender
 from ..adapters.map_parser import MapParser
 from ..adapters.telemetry_client import TelemetryReader
 from ..adapters.telemetry_installer import TelemetryInstaller
+from ..adapters.llm_client import LLMProvider
 from ..catgirl.bridge import CatgirlBridge
 
 ACTIVITY_TITLES = {
@@ -68,7 +69,8 @@ class PawpilotRuntime:
         host_persona = getattr(plugin, "persona", None)
         self.persona = Persona(host_persona)
         self.catgirl = CatgirlBridge()
-        self.emotion = EmotionRenderer(self.persona)
+        self.llm = LLMProvider()
+        self.emotion = EmotionRenderer(self.persona, llm=self.llm)
         self.engine = EventEngine(config)
         self.safety = SafetyGuard(config)
         self.arbiter = Arbiter(config, self.safety)
@@ -228,6 +230,32 @@ class PawpilotRuntime:
         self.arbiter.broadcast_categories[category] = bool(enabled)
         return True
 
+    def llm_config(self) -> dict:
+        """读 LLM 配置（ui_settings 的 llm 段）。"""
+        data = self._ui_settings()
+        llm = data.get("llm") if isinstance(data, dict) else {}
+        return llm if isinstance(llm, dict) else {}
+
+    async def save_llm_config(self, config: dict) -> bool:
+        """保存 LLM 配置并热应用（配置优先，未配置降级模板）。"""
+        import json
+        import os
+        data = self._ui_settings()
+        cfg = {k: str(config.get(k, "") or "").strip()
+               for k in ("provider", "model", "api_key", "base_url")}
+        data["llm"] = cfg
+        path = self._ui_settings_path()
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            self.plugin.logger.warning("save_llm_config failed: %s", exc)
+            return False
+        self._wire_llm()
+        return True
+
     async def start(self) -> Dict[str, Any]:
         if not self.cfg.enabled:
             return {"status": "disabled"}
@@ -235,6 +263,7 @@ class PawpilotRuntime:
         self.profile.load()
         self.level_celebrate.load()
         await self.settings_load()
+        self._wire_llm()
         templates = self.emotion._short_lines
         self.trip_summary = TripSummary(templates)
         self.engine.on_event(self._on_event)
@@ -243,6 +272,31 @@ class PawpilotRuntime:
         self._game_dir = self.telemetry_installer.detect_game_dir()
         self.telemetry_install_state = self.telemetry_installer.install(self._game_dir)
         self._check_map_version()
+        return {"status": "ready", "telemetry": self._probe_telemetry(),
+                "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot(),
+                "llm": self.llm.snapshot()}
+
+    def _wire_llm(self) -> None:
+        """LLM 配置：ui_settings 里配了 → 自建 LLM 优先；没配 → 模板降级。
+
+        配置来源：data/config/ui_settings.json 的 llm 段
+        （provider/model/api_key/base_url）。
+        """
+        data = self._ui_settings()
+        llm = data.get("llm") if isinstance(data, dict) else None
+        if isinstance(llm, dict):
+            provider = str(llm.get("provider", "") or "")
+            model = str(llm.get("model", "") or "")
+            api_key = str(llm.get("api_key", "") or "")
+            base_url = str(llm.get("base_url", "") or "")
+            self.llm.set_client(provider, model, api_key, base_url)
+            if provider and model:
+                self.plugin.logger.info("已配置 LLM: %s/%s", provider, model)
+            else:
+                self.plugin.logger.info("未配置 LLM，情感渲染用模板兜底")
+        else:
+            self.llm.set_client("", "")
+            self.plugin.logger.info("未配置 LLM，情感渲染用模板兜底")
         return {"status": "ready", "telemetry": self._probe_telemetry(),
                 "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot()}
 
@@ -586,6 +640,13 @@ class PawpilotRuntime:
             if m:
                 return int(m.group(1))
         return None
+
+    async def _say_line(self, event_name: str, **kw: Any) -> None:
+        """blind 短句推送：LLM 优先（配置了），失败/未配置用模板兜底。"""
+        text = await self.emotion.short_line_llm(event_name, **kw)
+        if not text:
+            text = self.emotion.short_line(event_name, **kw)
+        await self.push.push_direct(self.persona.polish(text))
 
     def _on_event(self, ev: TruckEvent) -> None:
         self._record_activity(ev)
@@ -1019,6 +1080,15 @@ class PawpilotRuntime:
         tip = self.knowledge.game_tip(text)
         if tip:
             return {"ok": True, "summary": tip}
+        # 配置了自建 LLM → 深度回答（失败/未配置自动落兜底）
+        if self.llm.configured:
+            prompt = (f"你是{self.persona.name}（{self.persona.user_call}的副驾驶猫娘）。"
+                      f"当前车辆 {s.truck_brand} {s.truck_name}，车速 {s.speed_kmh:.0f} km/h，"
+                      f"限速 {s.speed_limit_kmh:.0f} km/h。玩家说：{text}。"
+                      f"用一句话自然回应（25 字内，带猫娘语气）。")
+            answer = await self.llm.call(prompt)
+            if answer:
+                return {"ok": True, "summary": answer}
         # 兜底：知识性回应（车况 + 随机技巧），给 LLM 素材避免反问
         import random as _rnd
         extra = _rnd.choice(self.knowledge.drive_tips + self.knowledge.fuel_tips)
