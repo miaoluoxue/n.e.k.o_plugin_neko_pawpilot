@@ -857,7 +857,9 @@ class PawpilotRuntime:
             return self.emotion.fact_prompt(ev.name) + self._farewell()
         if ev.name == "trip_progress":
             d = ev.data
-            return self.emotion.fact_prompt(ev.name, percent=d.get("percent", 0),
+            mark = d.get("mark", 0)
+            ratio = {33: "三分之一", 50: "一半", 67: "三分之二", 100: "全程"}.get(mark, f"{mark}%")
+            return self.emotion.fact_prompt(ev.name, mark_ratio=ratio,
                                             km=d.get("km", 0), min=d.get("min", 0))
         if ev.name == "distance_mark":
             d = ev.data

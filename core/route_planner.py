@@ -20,7 +20,7 @@ class RoutePlanner:
         self.knowledge = knowledge
 
     def preview(self, snap) -> Optional[str]:
-        """接货时行程预览。"""
+        """接货时行程预览：路线/里程/时间 + 出行提示。"""
         if not snap.on_job:
             return None
         dist = snap.planned_distance_km
@@ -32,6 +32,15 @@ class RoutePlanner:
         # 长途分段建议
         if dist > 600:
             parts.append("900 公里级别长途喵，我建议中途歇一觉")
+        elif dist > 300:
+            parts.append("中长途喵，路上我会提醒你休息的~")
+        # 夜间出行提示（游戏内时间）
+        if snap.time_abs_min is not None:
+            hour = (snap.time_abs_min // 60) % 24
+            if hour >= 23 or hour < 5:
+                parts.append("这单要在夜里跑喵，我陪你，注意灯光和车速")
+            elif hour < 6 or hour >= 20:
+                parts.append("傍晚光线差，我帮你盯着限速喵")
         return " ".join(parts)
 
     def service_area_advice(self, snap) -> Optional[str]:

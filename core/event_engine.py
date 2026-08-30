@@ -25,7 +25,24 @@ EV_LOW_FUEL = "low_fuel"
 EV_GAME_START = "game_start"
 EV_GAME_END = "game_end"
 EV_TRIP_PROGRESS = "trip_progress"
-EV_DISTANCE_MARK = "distance_mark"     # 距离分级预告（10/5/1 km）
+EV_DISTANCE_MARK = "distance_mark"     # 距离分级预告
+
+
+def _gen_distance_anchors(total_km: float) -> tuple:
+    """按任务总里程自动生成距离锚点（不写死）。
+
+    规则：总里程的比例档（50%/25%/10%/5%/2.5%/1%）取整去重，
+    不足 1km 的档丢弃；短途单至少保留 1km 一档。
+    """
+    anchors = set()
+    for ratio in (0.5, 0.25, 0.1, 0.05, 0.025, 0.01):
+        a = round(total_km * ratio)
+        if a >= 1:
+            anchors.add(a)
+    # 短途单（比例档可能只剩 1km）：补 0.5km 档
+    if total_km < 60 and not anchors:
+        anchors.add(1)
+    return tuple(sorted(anchors, reverse=True))
 EV_TIME_RELAXED = "time_relaxed"    # 时间充裕
 EV_TIME_TIGHT = "time_tight"        # 时间紧张
 EV_EARLY_ARRIVAL = "early_arrival"  # 到货提前
@@ -66,6 +83,7 @@ class EventEngine:
         self._progress_fired: dict = {}
         self._distance_fired: dict = {}
         self._distance_init: Optional[float] = None
+        self._distance_anchors: tuple = ()
         self._sinks: List[Callable[[TruckEvent], None]] = []
         self._last_speeding_fire = 0.0
         self._last_speeding_speed = 0.0
@@ -168,13 +186,15 @@ class EventEngine:
         if s.on_job and s.planned_distance_km > 0:
             pct = s.trip_progress_percent
             if pct is not None:
-                for cp in (25, 50, 75, 100):
+                # 行程节点：1/3、1/2、2/3、完成（含剩余里程交互播报）
+                for cp in (33, 50, 67, 100):
                     if pct >= cp and not self._progress_fired.get(cp, False):
                         self._progress_fired[cp] = True
                         ev = self._emit(EV_TRIP_PROGRESS, s, {
                             "percent": pct,
                             "km": s.route_remaining_km,
                             "min": s.route_remaining_time_min,
+                            "mark": cp,
                         }, force=True)
                         if ev:
                             out.append(ev)
@@ -182,28 +202,26 @@ class EventEngine:
         elif not s.on_job and self._progress_fired:
             self._progress_fired = {}
 
-        # 距离分级锚点：还剩 10/5/1 km 时预告（与百分比锚点独立）
-        # 短途单（初始 <15km）跳过——百分比锚点已覆盖，避免接单即报
+        # 距离分级锚点：按任务总里程自动生成（不写死），剩余距离交叉时预告
         if s.on_job and s.route_remaining_km > 0:
             rem = s.route_remaining_km
             if self._distance_init is None:
                 self._distance_init = rem
-            if self._distance_init < 15:
-                pass  # 短途单：不启用距离锚点
-            else:
-                for dkm in (10, 5, 1):
-                    if rem <= dkm and not self._distance_fired.get(dkm, False):
-                        self._distance_fired[dkm] = True
-                        ev = self._emit(EV_DISTANCE_MARK, s, {
-                            "remaining_km": rem,
-                            "mark": dkm,
-                        }, force=True)
-                        if ev:
-                            out.append(ev)
-                        break
+                self._distance_anchors = _gen_distance_anchors(rem)
+            for dkm in self._distance_anchors:
+                if rem <= dkm and not self._distance_fired.get(dkm, False):
+                    self._distance_fired[dkm] = True
+                    ev = self._emit(EV_DISTANCE_MARK, s, {
+                        "remaining_km": rem,
+                        "mark": dkm,
+                    }, force=True)
+                    if ev:
+                        out.append(ev)
+                    break
         elif not s.on_job:
             self._distance_fired = {}
             self._distance_init = None
+            self._distance_anchors = ()
 
         if prev is not None:
             if s.on_job and not prev.on_job:
@@ -218,6 +236,7 @@ class EventEngine:
                 self._warned_early = False
                 self._distance_fired = {}
                 self._distance_init = None
+                self._distance_anchors = ()
             if not s.on_job and prev.on_job:
                 if s.ev_job_delivered:
                     ev = self._emit(EV_JOB_DELIVERED, s)

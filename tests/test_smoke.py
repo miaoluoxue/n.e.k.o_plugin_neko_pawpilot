@@ -469,9 +469,14 @@ def test_events_fire_without_job():
 
 
 def test_distance_marks():
-    """距离分级锚点：长途单剩 10/5/1km 各预告一次，短途单不触发。"""
+    """距离分级锚点：按任务里程自动生成，长/短途各有合理分级。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
-    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine, _gen_distance_anchors
+
+    # 锚点自动生成验证
+    assert _gen_distance_anchors(500) == (250, 125, 50, 25, 12, 5)
+    assert _gen_distance_anchors(20) == (10, 5, 2, 1)
+    assert _gen_distance_anchors(8) == (4, 2, 1)
 
     eng = EventEngine(PawpilotConfig())
     marks = []
@@ -485,20 +490,20 @@ def test_distance_marks():
         s.route_distance_km = rem * 1000.0
         return s
 
-    # 长途单：从 500km 一路到 0
-    for rem in (500, 100, 12, 9, 4, 0.5, 0.2):
+    # 长途单 500km：触发 250/125/50/25/12/5
+    for rem in (500, 260, 240, 130, 120, 55, 45, 26, 20, 13, 10, 4, 0.5):
         eng.feed(mk(rem))
-    assert marks == [10, 5, 1], f"长途单应依次触发 10/5/1，实际 {marks}"
+    assert marks == [250, 125, 50, 25, 12, 5], f"500km 应触发比例锚点，实际 {marks}"
     # 任务结束重置
     eng.feed(mk(0, on_job=False))
-    # 短途单（初始 <15km）不触发
+    # 短途单 8km：触发 4/2/1（也有分级，不写死）
     marks.clear()
     eng2 = EventEngine(PawpilotConfig())
     eng2.on_event(lambda ev: marks.append(ev.data.get("mark"))
                   if ev.name == "distance_mark" else None)
-    for rem in (12, 5, 1, 0.3):
+    for rem in (8, 5, 3, 1.5, 0.5):
         eng2.feed(mk(rem))
-    assert marks == [], f"短途单不应触发距离锚点，实际 {marks}"
+    assert marks == [4, 2, 1], f"8km 短途也应触发 4/2/1，实际 {marks}"
 
 
 def test_settings_persistence():
