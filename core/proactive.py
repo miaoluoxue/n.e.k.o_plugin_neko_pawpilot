@@ -16,6 +16,7 @@ class Proactive:
         self._drive_start_ts: Optional[float] = None
         self._last_drive_snap: Optional[Any] = None
         self._last_traffic_light_id: Optional[str] = None
+        self._last_station_id: Optional[str] = None
 
     def update(self, snap) -> None:
         """跟踪连续驾驶时长（仅非任务/暂停/长停时重置）。"""
@@ -38,6 +39,10 @@ class Proactive:
         traffic = self.traffic_propose(snap, now)
         if traffic:
             return traffic
+        # 加油站/服务区接近（按油量/剩余里程需要）
+        station = self.station_propose(snap, now)
+        if station:
+            return station
         # 低油量（每 10 分钟一次，阈值读配置）
         fuel_pct = float(getattr(self.cfg, "low_fuel_percent", 15))
         if snap.fuel_percent < fuel_pct and now - self._last_propose.get("fuel", 0) > 600:
@@ -89,6 +94,41 @@ class Proactive:
         if dist < 0.3:
             return "前方路口到啦，注意红绿灯减速喵！"
         return f"前方 {dist:.1f} km 有路口信号灯，提前收油喵~"
+
+    def station_propose(self, snap, now: float | None = None) -> Optional[str]:
+        """接近加油站/服务区：按需提醒（油量低→加油，长途→休息）。
+
+        每站 8 分钟冷却；离开搜索半径后重置可重新提醒。
+        """
+        if self.map_kb is None or not snap.on_job:
+            return None
+        now = now or time.time()
+        # 油量低 → 找加油站；否则长途 → 找服务区
+        low_fuel = snap.fuel_percent < 45
+        kind = "fuel" if low_fuel else "service"
+        max_km = 1.5 if low_fuel else 2.0
+        fac = self.map_kb.nearest_facility(snap.world_x, snap.world_z,
+                                           kind=kind, max_km=max_km)
+        if not fac:
+            self._last_station_id = None
+            return None
+        sid = fac.get("id")
+        if sid == self._last_station_id:
+            return None
+        if now - self._last_propose.get(f"station_{sid}", 0) < 480:
+            return None
+        self._last_propose[f"station_{sid}"] = now
+        self._last_station_id = sid
+        dist = fac.get("distance_km", 0)
+        if low_fuel:
+            pct = snap.fuel_percent
+            if dist < 0.3:
+                return f"油量只剩 {pct:.0f}% 了喵，加油站就在眼前，进去补点油吧！"
+            return f"油量剩 {pct:.0f}%，前方 {dist:.1f} km 有加油站，顺路加个油喵~"
+        remaining = snap.route_remaining_km
+        if dist < 0.3:
+            return "前面就是服务区喵，长途开累了正好歇一歇！"
+        return f"前方 {dist:.1f} km 有服务区，这单还剩 {remaining:.0f} km，中途休息一下喵~"
 
     def weather_propose(self, ocr_text: str, now: float | None = None) -> Optional[str]:
         """OCR 检测到雨/雪 → 天气提醒（每 10 分钟一次）。"""

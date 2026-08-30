@@ -422,19 +422,52 @@ def test_traffic_light_proposal():
 
     p = Proactive(PawpilotConfig(), map_kb=kb)
     now = _time.time()
-    # 接近 → 触发
     assert p.traffic_propose(Snap(), now) is not None
-    # 同一灯冷却 → None
     assert p.traffic_propose(Snap(), now + 1) is None
-    # 冷却过期但仍在 1.2km 内 → None（同一灯只报一次）
     assert p.traffic_propose(Snap(), now + 301) is None
-    # 离开搜索半径（找不到灯）→ 重置状态
     far = Snap()
-    far.world_x, far.world_z = 1734 + 3000, 6089  # ~3km 外
+    far.world_x, far.world_z = 1734 + 3000, 6089
     assert p.traffic_propose(far, now + 301) is None
     assert p._last_traffic_light_id is None
-    # 回到灯旁 → 重新触发
     assert p.traffic_propose(Snap(), now + 302) is not None
+
+
+def test_station_proposal():
+    """加油站/服务区接近提议：低油量→加油，长途→休息，冷却+重置。"""
+    import time as _time
+    from plugin.plugins.neko_pawpilot.core.map_kb import MapKnowledge
+    from plugin.plugins.neko_pawpilot.core.proactive import Proactive
+
+    kb = MapKnowledge()
+    fuel = kb.nearest_facility(1798, 1783, kind="fuel", max_km=2)
+    assert fuel and fuel["kind"] == "fuel"
+    svc = kb.nearest_facility(2477, 6713, kind="service", max_km=2)
+    assert svc and svc["kind"] == "service"
+
+    class Snap:
+        def __init__(self, x, z, fuel_pct=80, rem=400):
+            self.on_job = True
+            self.world_x, self.world_z = x, z
+            self.fuel_percent = fuel_pct
+            self.route_remaining_km = rem
+            self.rest_stop_min = 500
+            self.speed_kmh = 60
+            self.time_abs_min = 720
+            self.delivery_remaining_min = 300
+
+    p = Proactive(PawpilotConfig(), map_kb=kb)
+    now = _time.time()
+    # 低油量接近加油站
+    msg = p.station_propose(Snap(1798, 1783, fuel_pct=30), now)
+    assert msg and "油" in msg
+    # 冷却：同一站不再报
+    assert p.station_propose(Snap(1798, 1783, fuel_pct=30), now + 1) is None
+    # 高油量接近服务区（长途）
+    msg2 = p.station_propose(Snap(2477, 6713, fuel_pct=80), now + 2)
+    assert msg2 and "服务区" in msg2
+    # 离开后重置（冷却期内回到同一站不重报，防绕圈）
+    p.station_propose(Snap(5000, 5000, fuel_pct=30), now + 3)
+    assert p._last_station_id is None
 
 
 def test_events_fire_without_job():
