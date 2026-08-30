@@ -53,6 +53,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "trailer_attach": EventSpec("trailer_attach", CAT_TRIP, 2, False, -1),
     "trailer_detach": EventSpec("trailer_detach", CAT_TRIP, 2, False, -1),
     "trip_progress":  EventSpec("trip_progress", CAT_TRIP, 2, False, 300),
+    "distance_mark":  EventSpec("distance_mark", CAT_TRIP, 3, False, 120),
     "game_start":     EventSpec("game_start", CAT_LIFECYCLE, 2, False, -1),
     "game_end":       EventSpec("game_end", CAT_LIFECYCLE, 2, False, -1),
     "time_relaxed":   EventSpec("time_relaxed", CAT_TASK, 3, False, -1),

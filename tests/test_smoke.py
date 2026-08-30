@@ -468,6 +468,39 @@ def test_events_fire_without_job():
     assert "crash" in events
 
 
+def test_distance_marks():
+    """距离分级锚点：长途单剩 10/5/1km 各预告一次，短途单不触发。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    eng = EventEngine(PawpilotConfig())
+    marks = []
+    eng.on_event(lambda ev: marks.append(ev.data.get("mark"))
+                 if ev.name == "distance_mark" else None)
+
+    def mk(rem, on_job=True):
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.on_job = on_job
+        s.route_distance_km = rem * 1000.0
+        return s
+
+    # 长途单：从 500km 一路到 0
+    for rem in (500, 100, 12, 9, 4, 0.5, 0.2):
+        eng.feed(mk(rem))
+    assert marks == [10, 5, 1], f"长途单应依次触发 10/5/1，实际 {marks}"
+    # 任务结束重置
+    eng.feed(mk(0, on_job=False))
+    # 短途单（初始 <15km）不触发
+    marks.clear()
+    eng2 = EventEngine(PawpilotConfig())
+    eng2.on_event(lambda ev: marks.append(ev.data.get("mark"))
+                  if ev.name == "distance_mark" else None)
+    for rem in (12, 5, 1, 0.3):
+        eng2.feed(mk(rem))
+    assert marks == [], f"短途单不应触发距离锚点，实际 {marks}"
+
+
 def test_settings_persistence():
     """面板设置（dry_run/频率/类别）保存后可恢复。"""
     import asyncio

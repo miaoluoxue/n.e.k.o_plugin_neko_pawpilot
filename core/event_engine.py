@@ -25,6 +25,7 @@ EV_LOW_FUEL = "low_fuel"
 EV_GAME_START = "game_start"
 EV_GAME_END = "game_end"
 EV_TRIP_PROGRESS = "trip_progress"
+EV_DISTANCE_MARK = "distance_mark"     # 距离分级预告（10/5/1 km）
 EV_TIME_RELAXED = "time_relaxed"    # 时间充裕
 EV_TIME_TIGHT = "time_tight"        # 时间紧张
 EV_EARLY_ARRIVAL = "early_arrival"  # 到货提前
@@ -63,6 +64,8 @@ class EventEngine:
         self._warned_cargo = False
         self._warned_early = False
         self._progress_fired: dict = {}
+        self._distance_fired: dict = {}
+        self._distance_init: Optional[float] = None
         self._sinks: List[Callable[[TruckEvent], None]] = []
         self._last_speeding_fire = 0.0
         self._last_speeding_speed = 0.0
@@ -179,6 +182,29 @@ class EventEngine:
         elif not s.on_job and self._progress_fired:
             self._progress_fired = {}
 
+        # 距离分级锚点：还剩 10/5/1 km 时预告（与百分比锚点独立）
+        # 短途单（初始 <15km）跳过——百分比锚点已覆盖，避免接单即报
+        if s.on_job and s.route_remaining_km > 0:
+            rem = s.route_remaining_km
+            if self._distance_init is None:
+                self._distance_init = rem
+            if self._distance_init < 15:
+                pass  # 短途单：不启用距离锚点
+            else:
+                for dkm in (10, 5, 1):
+                    if rem <= dkm and not self._distance_fired.get(dkm, False):
+                        self._distance_fired[dkm] = True
+                        ev = self._emit(EV_DISTANCE_MARK, s, {
+                            "remaining_km": rem,
+                            "mark": dkm,
+                        }, force=True)
+                        if ev:
+                            out.append(ev)
+                        break
+        elif not s.on_job:
+            self._distance_fired = {}
+            self._distance_init = None
+
         if prev is not None:
             if s.on_job and not prev.on_job:
                 ev = self._emit(EV_JOB_START, s)
@@ -190,6 +216,8 @@ class EventEngine:
                 self._warned_tight = False
                 self._warned_cargo = False
                 self._warned_early = False
+                self._distance_fired = {}
+                self._distance_init = None
             if not s.on_job and prev.on_job:
                 if s.ev_job_delivered:
                     ev = self._emit(EV_JOB_DELIVERED, s)

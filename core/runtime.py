@@ -51,6 +51,7 @@ ACTIVITY_TITLES = {
     "game_start": "进入游戏",
     "game_end": "退出游戏",
     "trip_progress": "行程进度",
+    "distance_mark": "距离预告",
     "time_relaxed": "时间充裕",
     "time_tight": "时间紧张",
     "early_arrival": "提前到货",
@@ -858,6 +859,11 @@ class PawpilotRuntime:
             d = ev.data
             return self.emotion.fact_prompt(ev.name, percent=d.get("percent", 0),
                                             km=d.get("km", 0), min=d.get("min", 0))
+        if ev.name == "distance_mark":
+            d = ev.data
+            return self.emotion.fact_prompt(ev.name,
+                                            km=round(d.get("remaining_km", 0)),
+                                            mark=d.get("mark", 0))
         if ev.name == "time_relaxed":
             return self.emotion.fact_prompt(ev.name, min=ev.data.get("min", 0))
         if ev.name == "time_tight":
