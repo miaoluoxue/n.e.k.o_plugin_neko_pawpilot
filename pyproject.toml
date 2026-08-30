@@ -3,6 +3,7 @@ name = "neko_pawpilot"
 version = "0.1.0"
 description = "ETS2 catgirl copilot companion."
 requires-python = ">=3.10"
+license = "Apache-2.0"
 dependencies = []
 
 [tool.neko.build]
