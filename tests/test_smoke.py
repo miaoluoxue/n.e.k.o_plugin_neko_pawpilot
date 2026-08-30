@@ -506,6 +506,21 @@ def test_game_knowledge_expanded():
     assert "危险品" in kb.cargo_tip("化学品")
 
 
+def test_road_knowledge():
+    """道路知识：道路类型/弯道/坡道/隧道/环岛/施工/山路/限速。"""
+    from plugin.plugins.neko_pawpilot.core.knowledge import KnowledgeBase
+    kb = KnowledgeBase()
+    assert "高速" in kb.game_tip("高速和国道有什么区别")
+    assert "弯道" in kb.game_tip("弯道怎么开安全")
+    assert "坡" in kb.game_tip("下长坡注意什么")
+    assert "灯" in kb.game_tip("过隧道要注意什么")
+    assert "环岛" in kb.game_tip("环岛怎么走")
+    assert "施工" in kb.game_tip("遇到施工区怎么办")
+    assert "山路" in kb.game_tip("山路怎么开")
+    assert "限速" in kb.game_tip("限速牌怎么看")
+    assert "超车" in kb.game_tip("高速上怎么变道")
+
+
 def test_events_fire_without_job():
     """自由驾驶（无任务）时急刹/超速/撞车也必须触发事件。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
