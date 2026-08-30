@@ -1,0 +1,12 @@
+{
+  "dry_run": false,
+  "voice_style": "default",
+  "broadcast_frequency": "active",
+  "broadcast_categories": {
+    "safety": true,
+    "task": true,
+    "trip": true,
+    "lifecycle": true,
+    "chatter": true
+  }
+}
