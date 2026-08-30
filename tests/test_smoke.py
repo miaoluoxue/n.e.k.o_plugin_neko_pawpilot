@@ -470,6 +470,22 @@ def test_station_proposal():
     assert p._last_station_id is None
 
 
+def test_game_knowledge():
+    """游戏机制知识问答：罚款/疲劳/升级/档位/天气/技巧兜底。"""
+    from plugin.plugins.neko_pawpilot.core.knowledge import KnowledgeBase
+    kb = KnowledgeBase()
+    assert "罚款" in kb.game_tip("罚款怎么算")
+    assert "休息" in kb.game_tip("疲劳驾驶会怎么样")
+    assert "升级" in kb.game_tip("怎么升级卡车")
+    assert "档" in kb.game_tip("手动挡怎么开")
+    assert "雨" in kb.game_tip("下雨天要注意什么")
+    # 技巧兜底
+    assert kb.game_tip("有什么驾驶技巧")
+    assert kb.drive_tip()
+    # 完全不匹配返回 None
+    assert kb.game_tip("帮我看看这个货") is None
+
+
 def test_events_fire_without_job():
     """自由驾驶（无任务）时急刹/超速/撞车也必须触发事件。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot

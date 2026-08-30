@@ -1008,6 +1008,12 @@ class PawpilotRuntime:
                 verdict = "划算" if per_km > 15 else "一般" if per_km > 10 else "不划算"
                 return {"ok": True, "summary": (
                     f"这单 {dist} km 赚 {revenue} €，每公里 {per_km:.0f} €，{verdict}喵")}
+        # 游戏机制知识问答（罚款/疲劳/升级/档位/天气/赚钱等）
+        if "怎么" in text or "吗" in text or "什么" in text or "如何" in text \
+                or "技巧" in text or "知识" in text or "为什么" in text:
+            tip = self.knowledge.game_tip(text)
+            if tip:
+                return {"ok": True, "summary": tip}
         return {"ok": True, "summary": (
             f"当前车辆 {s.truck_brand} {s.truck_name}，限速 {s.speed_limit_kmh:.0f} km/h")}
 

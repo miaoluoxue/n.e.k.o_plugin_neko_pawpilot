@@ -1,7 +1,11 @@
-"""欧卡知识库：卡车/省油/货运经济/城市距离查询。"""
+"""欧卡知识库：卡车/驾驶技巧/游戏机制/货运经济/城市距离查询。
+
+知识分主题，玩家问到时按关键词匹配返回；猫娘聊天时也可引用。
+"""
 
 from __future__ import annotations
 
+import random
 from typing import Any, Dict, Optional
 
 # 常用卡车参数（品牌 → 引擎/油箱/特点）
@@ -42,6 +46,75 @@ CITY_DISTANCES: Dict[str, Dict[str, int]] = {
     "Rome": {"Milan": 580, "Paris": 1400},
 }
 
+# ── 游戏机制知识（按主题，关键词命中 → 答复）──
+GAME_KNOWLEDGE: Dict[str, Dict[str, Any]] = {
+    "罚款": {
+        "keywords": ("罚款", "罚单", "违章", "扣钱", "超速相机", "红灯"),
+        "answer": "罚款主要来自超速相机、闯红灯和事故。超速相机拍了要扣钱，"
+                  "路口红灯一定等绿灯喵。撞车罚款按损伤算，小心开省下的都是净赚！",
+    },
+    "疲劳": {
+        "keywords": ("疲劳", "困", "强制休息", "睡觉", "休息"),
+        "answer": "连续驾驶太久会触发强制休息，游戏要求去服务区/停车区睡觉。"
+                  "困了别硬撑，疲劳驾驶罚款很重喵~",
+    },
+    "货物损坏": {
+        "keywords": ("货物损坏", "完好率", "损伤", "货损", "碎了"),
+        "answer": "货物损坏按完好率扣钱，撞车/急刹都会损伤货物。玻璃、精密仪器"
+                  "最怕颠，提前刹车保持平稳喵。到货完好率越高收入越高！",
+    },
+    "升级": {
+        "keywords": ("升级", "改装", "引擎", "变速箱", "车库", "买新车"),
+        "answer": "升级顺序建议：先引擎（动力）→ 变速箱（省油）→ 刹车/轮胎（安全）。"
+                  "赚到钱先去车行看看，引擎升级长途明显轻松喵~",
+    },
+    "档位": {
+        "keywords": ("档位", "换挡", "挂挡", "手动挡", "离合器"),
+        "answer": "起步一档，转速到 1500 左右升档；重货用低档位起步更稳。"
+                  "如果不会手动挡，自动挡也能开，但手动挡爬坡更省油喵。",
+    },
+    "收费站": {
+        "keywords": ("收费站", "过路费", "高速费", "toll"),
+        "answer": "高速有收费站，按里程收费。赶时间走高速，不赶走国道免费"
+                  "但慢。欧洲各国收费不一样，边境附近注意喵~",
+    },
+    "天气": {
+        "keywords": ("天气", "下雨", "下雪", "雨天", "雪天", "雾"),
+        "answer": "雨天路滑刹车距离变长，雪天更容易打滑。下雨记得开雨刷，"
+                  "大雾开雾灯慢行。恶劣天气事故率高，小心喵！",
+    },
+    "燃料": {
+        "keywords": ("加油", "柴油", "油量", "没油", "断油"),
+        "answer": "油量低到红线就该找加油站，高速服务区基本都有。"
+                  "柴油车别开到彻底没油，抛锚叫救援要花大钱喵~",
+    },
+    "任务选择": {
+        "keywords": ("接单", "任务选择", "选任务", "什么任务", "跑什么"),
+        "answer": "选任务看三样：每公里单价、货物类型、目的地。重货短途单价高，"
+                  "轻货长途总量大；新城市解锁新区域，平衡着来喵~",
+    },
+    "收入": {
+        "keywords": ("怎么赚钱", "赚钱", "收入", "收益", "利润"),
+        "answer": "赚钱核心：接高价单（看每公里 €）+ 保持货物完好 + 别违章罚款。"
+                  "升级引擎后接更重的货，长途单价更高喵！",
+    },
+    "品牌": {
+        "keywords": ("哪个牌子", "什么牌子好", "买哪款", "卡车推荐", "推荐卡车"),
+        "answer": "各品牌各有特点：斯堪尼亚 V8 动力猛，沃尔沃安全配置全，"
+                  "奔驰舒适，DAF 省油。预算有限选 IVECO，追求体验上斯堪尼亚喵~",
+    },
+}
+
+# 驾驶技巧知识（补充省油之外的技巧）
+DRIVE_TIPS = [
+    "高速巡航用定速巡航，右脚放松还省油",
+    "下长坡用发动机制动/缓速器，别一直踩刹车，刹车会过热",
+    "弯道提前减速入弯，出弯再加速，重车更容易侧翻",
+    "超车留足距离，大车盲区大，别贴太近",
+    "进服务区提前打转向灯，后面车多别急刹",
+    "夜间会车用近光灯，远光会晃到对面司机",
+]
+
 
 class KnowledgeBase:
     """欧卡知识库查询。"""
@@ -51,6 +124,8 @@ class KnowledgeBase:
         self.fuel_tips = FUEL_TIPS
         self.cargo = CARGO_ECONOMY
         self.distances = CITY_DISTANCES
+        self.game = GAME_KNOWLEDGE
+        self.drive_tips = DRIVE_TIPS
 
     def truck_info(self, brand: str) -> Optional[str]:
         """查卡车参数。"""
@@ -62,8 +137,11 @@ class KnowledgeBase:
 
     def fuel_tip(self) -> str:
         """随机一条省油技巧。"""
-        import random
         return random.choice(self.fuel_tips)
+
+    def drive_tip(self) -> str:
+        """随机一条驾驶技巧。"""
+        return random.choice(self.drive_tips)
 
     CARGO_KEYWORDS = {
         "重货": ("steel", "钢材", "木材", "矿石", "铁"),
@@ -80,6 +158,18 @@ class KnowledgeBase:
             if any(k in cargo for k in keywords):
                 return f"{cargo}是{kind}，{self.cargo[kind]}"
         return "货物运输注意控制车速和制动，稳字当头"
+
+    def game_tip(self, text: str) -> Optional[str]:
+        """按玩家提问匹配游戏机制知识。"""
+        if not text:
+            return None
+        for topic, data in self.game.items():
+            if any(k in text for k in data["keywords"]):
+                return data["answer"]
+        # 技巧/知识兜底：随机驾驶技巧
+        if "技巧" in text or "怎么开" in text or "怎么驾驶" in text:
+            return self.drive_tip()
+        return None
 
     def city_distance(self, a: str, b: str) -> Optional[int]:
         """查两城距离。"""
@@ -101,7 +191,6 @@ class KnowledgeBase:
     def best_city_tip(self, dst: str = "") -> str:
         """城市收益建议（根据已知距离推性价比）。"""
         if dst:
-            # 从城市距离表找这个城市能到的路线
             for city, table in self.distances.items():
                 if dst and city.lower() in dst.lower():
                     longest = max(table.values())
