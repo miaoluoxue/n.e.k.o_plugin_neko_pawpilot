@@ -486,6 +486,26 @@ def test_game_knowledge():
     assert kb.game_tip("帮我看看这个货") is None
 
 
+def test_game_knowledge_expanded():
+    """扩充知识库：国家/左行/货物/司机/车库/油价/特殊货物 + 组合词防截胡。"""
+    from plugin.plugins.neko_pawpilot.core.knowledge import KnowledgeBase
+    kb = KnowledgeBase()
+    # 新主题命中
+    assert "英国" in kb.game_tip("英国怎么开")
+    assert "危险品" in kb.game_tip("有什么特殊货物")
+    assert "司机" in kb.game_tip("雇司机怎么管")
+    assert "车库" in kb.game_tip("车库怎么升级")  # 组合词优先于升级主题
+    assert "东欧" in kb.game_tip("哪加油便宜")    # 油价优先于燃料
+    assert "渡轮" in kb.game_tip("渡轮怎么坐")
+    # 货物明细
+    assert "几十种" in kb.game_tip("什么货物好拉")
+    # 城市距离扩充
+    assert kb.city_distance("Berlin", "Prague") == 350
+    assert kb.city_distance("Madrid", "Barcelona") == 620
+    # 危险品货物
+    assert "危险品" in kb.cargo_tip("化学品")
+
+
 def test_events_fire_without_job():
     """自由驾驶（无任务）时急刹/超速/撞车也必须触发事件。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
