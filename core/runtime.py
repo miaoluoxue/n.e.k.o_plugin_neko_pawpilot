@@ -20,7 +20,6 @@ from .profile import DriverProfile
 from .photo_album import PhotoAlbum
 from .recall import Recall
 from .route_planner import RoutePlanner
-from .level_celebrate import LevelCelebrate
 from .safety_guard import SafetyGuard
 from .scene_chat import SceneChat
 from .small_talk import SmallTalk
@@ -103,6 +102,10 @@ class PawpilotRuntime:
         self._ocr_interval = float(self.ocr_regions.get("scan_interval_s", 600))
         self._last_ocr_at = 0.0
         self._tick_task: Optional[asyncio.Task] = None
+        self._propose_task: Optional[asyncio.Task] = None
+        self._bg_thread: Optional[Any] = None
+        self._bg_stop: Optional[Any] = None
+        self._bg_loop_ref: Optional[Any] = None
         self._job_crashes = 0
         self._job_speedings = 0
         self._job_hard_brakes = 0
@@ -120,10 +123,18 @@ class PawpilotRuntime:
         self._bg_tasks: set = set()
 
     def _spawn(self, coro) -> None:
-        """创建后台任务并跟踪，防泄漏；异常打日志。"""
-        task = asyncio.create_task(coro)
+        """创建后台任务并跟踪，防泄漏；异常打日志。
+
+        必须在 runtime 自己的后台循环（_bg_loop）里调用；宿主 lifecycle/entry
+        的 loop 与后台线程不同，跨 loop create_task 会抛 RuntimeError
+        （照 neko_fishpower 线程改造）。
+        """
+        loop = self._bg_loop_ref
+        if loop is None or not loop.is_running():
+            self.plugin.logger.warning("_spawn 无后台循环，丢弃任务")
+            return
+        task = asyncio.run_coroutine_threadsafe(coro, loop)
         self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
 
         def _log_err(t):
             try:
@@ -132,6 +143,7 @@ class PawpilotRuntime:
                 if not isinstance(exc, asyncio.CancelledError):
                     self.plugin.logger.warning("bg task error: %s", exc)
         task.add_done_callback(_log_err)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def _ui_settings_path(self):
         from pathlib import Path
@@ -267,14 +279,45 @@ class PawpilotRuntime:
         templates = self.emotion._short_lines
         self.trip_summary = TripSummary(templates)
         self.engine.on_event(self._on_event)
-        self._tick_task = asyncio.create_task(self._tick_loop())
-        self._propose_task = asyncio.create_task(self._propose_loop())
+        # 后台循环必须跑在独立 daemon 线程里：宿主 lifecycle startup 用
+        # asyncio.run()（临时 loop），create_task 的后台任务会在返回后被
+        # 取消（照 neko_fishpower 线程改造，进度/事件播报依赖 tick_loop）。
+        import threading
+        self._bg_stop = threading.Event()
+        self._bg_thread = threading.Thread(
+            target=self._bg_runner, daemon=True, name="pawpilot-bg")
+        self._bg_thread.start()
         self._game_dir = self.telemetry_installer.detect_game_dir()
         self.telemetry_install_state = self.telemetry_installer.install(self._game_dir)
         self._check_map_version()
         return {"status": "ready", "telemetry": self._probe_telemetry(),
                 "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot(),
                 "llm": self.llm.snapshot()}
+
+    def _bg_runner(self) -> None:
+        """后台线程入口：自己的事件循环跑 tick/propose。"""
+        try:
+            asyncio.run(self._bg_loop())
+        except Exception as exc:
+            self.plugin.logger.exception("后台循环异常退出: %s", exc)
+
+    async def _bg_loop(self) -> None:
+        """后台主循环：tick + propose（同线程内任务，照 neko_fishpower）。"""
+        self._bg_loop_ref = asyncio.get_running_loop()
+        self._tick_task = asyncio.create_task(self._tick_loop())
+        self._propose_task = asyncio.create_task(self._propose_loop())
+        try:
+            while not self._bg_stop.is_set():
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for task in (self._tick_task, getattr(self, "_propose_task", None)):
+                if task:
+                    task.cancel()
+            for task in list(self._bg_tasks):
+                task.cancel()
+            self._bg_loop_ref = None
 
     def _wire_llm(self) -> None:
         """LLM 配置：ui_settings 里配了 → 自建 LLM 优先；没配 → 模板降级。
@@ -323,6 +366,7 @@ class PawpilotRuntime:
 
     async def reparse_map(self) -> Dict[str, Any]:
         """手动触发地图解析：运行提取器并重新加载知识库（耗时，后台执行）。"""
+        from pathlib import Path
         if not self.map_parser.extractor_available():
             return {"ok": False, "detail": "地图提取器不可用（缺编译产物）"}
         if not self._game_dir:
@@ -355,18 +399,12 @@ class PawpilotRuntime:
 
     async def shutdown(self) -> None:
         self.pilot.release(reason="shutdown")
-        for task in (self._tick_task, getattr(self, "_propose_task", None)):
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        # 取消所有后台任务（推送/叙事链/存档）
-        for task in list(self._bg_tasks):
-            task.cancel()
-        if self._bg_tasks:
-            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        if self._bg_stop is not None:
+            self._bg_stop.set()
+        if self._bg_thread is not None and self._bg_thread.is_alive():
+            self._bg_thread.join(timeout=5.0)
+        self._bg_thread = None
+        self._bg_loop_ref = None
 
     async def dashboard_state(self) -> Dict[str, Any]:
         """主面板状态（@ui.context dashboard）。"""

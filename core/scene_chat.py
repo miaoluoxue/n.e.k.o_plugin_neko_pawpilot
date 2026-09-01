@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 # 关键词 → (话题文本, 优先级)
 SCENE_KEYWORDS: List[Tuple[Tuple[str, ...], str, int]] = [
-    (("rest area", "服务区", "休息区"), "前面有服务区喵，要不要歇会儿？", 3),
+    (("rest area", "服务区", "休息区"), "前面有服务区喵，正好歇口气再走~", 3),
     (("gas", "fuel", "加油站", "油站"), "加油站！顺路补个油喵~", 3),
     (("police", "警车", "police car"), "诶？前面有警车！千万别超速喵！🚔", 5),
     (("accident", "事故", "crash"), "前面好像有事故喵，绕一下吧，安全第一！", 5),
@@ -17,8 +17,8 @@ SCENE_KEYWORDS: List[Tuple[Tuple[str, ...], str, int]] = [
     (("rain", "雨", "wet"), "下雨了喵！雨刮开起来，慢点开~", 4),
     (("snow", "雪", "winter"), "下雪了喵！路面滑，千万别急刹！", 5),
     (("tunnel", "隧道"), "进隧道了喵，记得开灯！", 2),
-    (("bridge", "桥", "brücke"), "过桥了喵，风景不错吧？", 2),
-    (("border", "边境", "海关"), "到边境了喵，证件准备好了吗？", 2),
+    (("bridge", "桥", "brücke"), "过桥了喵，这儿的风景真不错~", 2),
+    (("border", "边境", "海关"), "到边境了喵，注意证件和海关检查~", 2),
     (("night", "night"), "天黑了喵，我陪你跑夜路~", 2),
 ]
 

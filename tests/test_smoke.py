@@ -795,7 +795,10 @@ def test_memory_written_on_job_start():
     from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
 
     async def _run():
+        import asyncio as _asyncio
         rt = PawpilotRuntime(_FakePluginForRt(), PawpilotConfig())
+        # 测试环境无后台线程：把 _spawn 的提交目标指向当前 loop
+        rt._bg_loop_ref = _asyncio.get_running_loop()
         rt.engine = EventEngine(PawpilotConfig())
         rt.engine.on_event(rt._on_event)
         s = TruckSnapshot()
