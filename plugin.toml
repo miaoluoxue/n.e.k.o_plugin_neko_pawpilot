@@ -4,7 +4,7 @@ name = "猫爪副驾"
 description = "欧卡2陪玩：遥测感知驾驶、事故急救、超时提醒、路线规划、画面畅聊，让每趟长途都有猫娘陪伴。"
 short_description = "ETS2 catgirl copilot companion."
 keywords = ["ets2", "欧卡2", "欧卡", "副驾驶", "驾驶", "卡车", "euro truck", "truck", "copilot", "陪玩", "开车"]
-version = "0.1.0"
+version = "0.0.1"
 entry = "plugin.plugins.neko_pawpilot:NekoPawpilotPlugin"
 
 [plugin.author]
