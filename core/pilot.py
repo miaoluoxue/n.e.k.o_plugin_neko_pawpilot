@@ -9,14 +9,8 @@
 
 from __future__ import annotations
 
-import math
 import time
 from typing import Any, Dict, Optional
-
-try:
-    from ..adapters import _vendor  # noqa: F401  确保 vendor 路径
-except Exception:
-    pass
 
 # 状态机
 IDLE = "idle"
@@ -55,7 +49,7 @@ class CatPilot:
         try:
             import sys
             from pathlib import Path
-            vendor = Path(__file__).resolve().parent.parent / "adapters" / "_vendor"
+            vendor = Path(__file__).resolve().parent.parent / "adapters" / "vendor"
             if str(vendor) not in sys.path:
                 sys.path.insert(0, str(vendor))
             import pydirectinput

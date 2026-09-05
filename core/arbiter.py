@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .event_catalog import BROADCAST_FREQUENCY_MULTIPLIERS, preempt_ids, spec
+from .event_catalog import BROADCAST_FREQUENCY_MULTIPLIERS, spec
 from .safety_guard import SafetyGuard
 from .scenario import ScenarioMachine
 

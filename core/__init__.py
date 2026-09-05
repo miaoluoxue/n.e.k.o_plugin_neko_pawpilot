@@ -18,8 +18,8 @@ from .recall import Recall
 from .route_planner import RoutePlanner
 from .runtime import PawpilotRuntime
 from .safety_guard import SafetyGuard
-from .scene_chat import SceneChat
 from .scenario import ScenarioMachine
+from .scene_chat import SceneChat
 from .small_talk import SmallTalk
 from .templates import EmotionRenderer
 from .trip_summary import TripSummary

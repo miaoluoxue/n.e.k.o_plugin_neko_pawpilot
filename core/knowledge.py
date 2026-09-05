@@ -436,7 +436,6 @@ class KnowledgeBase:
         if dst:
             for city, table in self.distances.items():
                 if dst and city.lower() in dst.lower():
-                    longest = max(table.values())
                     return (f"{dst}是个大枢纽喵，跑长途收益高；"
                             f"比如到{list(table.keys())[0]}约 {list(table.values())[0]} km")
         return "欧洲货运看距离和货物类型喵，重货短途、轻货长途最划算"

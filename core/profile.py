@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 from typing import Any, Dict, Optional
 
 PROFILE_KEY = "driver_profile"

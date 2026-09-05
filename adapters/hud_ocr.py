@@ -15,10 +15,15 @@ class HudOcr:
         self._error: Optional[str] = None
 
     def is_available(self) -> bool:
+        import importlib.util
+        if importlib.util.find_spec("mss") is None:
+            self._error = "mss 或 rapidocr 不可用"
+            return False
         try:
-            import mss
-            from plugin.plugins._shared.rapidocr import RapidOcrBackend
-            return True
+            from plugin.plugins._shared.rapidocr import (
+                RapidOcrBackend as _RapidOcrBackend,
+            )
+            return _RapidOcrBackend is not None
         except ImportError:
             self._error = "mss 或 rapidocr 不可用"
             return False

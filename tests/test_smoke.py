@@ -1,47 +1,43 @@
 """冒烟测试：manifest 校验 + 核心逻辑（直连根目录导入）。"""
 
+# 包链 + SDK stub 由 conftest.py 建立；本文件只做纯 import（避免 E402）。
 from __future__ import annotations
 
 import pathlib
 import shutil
-import sys
 import time
 import tomllib
 
+from plugin.plugins.neko_pawpilot.adapters.telemetry_client import (
+    TruckSnapshot,
+)
+from plugin.plugins.neko_pawpilot.core.arbiter import Arbiter
+from plugin.plugins.neko_pawpilot.core.challenge import Challenge
+from plugin.plugins.neko_pawpilot.core.config_model import PawpilotConfig
+from plugin.plugins.neko_pawpilot.core.event_catalog import (
+    EVENT_CATALOG,
+    spec,
+)
+from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+from plugin.plugins.neko_pawpilot.core.knowledge import KnowledgeBase
+from plugin.plugins.neko_pawpilot.core.ledger import Ledger
+from plugin.plugins.neko_pawpilot.core.memory import MemoryStore
+from plugin.plugins.neko_pawpilot.core.mood import Persona
+from plugin.plugins.neko_pawpilot.core.proactive import Proactive
+from plugin.plugins.neko_pawpilot.core.profile import DriverProfile
+from plugin.plugins.neko_pawpilot.core.recall import Recall
+from plugin.plugins.neko_pawpilot.core.safety_guard import SafetyGuard
+from plugin.plugins.neko_pawpilot.core.scenario import (
+    HIGHWAY,
+    IDLE,
+    URBAN,
+    ScenarioMachine,
+)
+from plugin.plugins.neko_pawpilot.core.small_talk import SmallTalk
+from plugin.plugins.neko_pawpilot.core.templates import EmotionRenderer
+from plugin.plugins.neko_pawpilot.core.trip_summary import TripSummary
+
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
-
-# 本地独立跑：建立 plugin.plugins.neko_pawpilot 包链（与 conftest 一致）
-import types as _types
-import sys as _sys
-
-_t = _types.ModuleType("plugin")
-_t.__path__ = []
-_sys.modules["plugin"] = _t
-_t = _types.ModuleType("plugin.plugins")
-_t.__path__ = []
-_sys.modules["plugin.plugins"] = _t
-_pkg = _types.ModuleType("plugin.plugins.neko_pawpilot")
-_pkg.__path__ = [str(_ROOT)]
-_sys.modules["plugin.plugins.neko_pawpilot"] = _pkg
-
-from plugin.plugins.neko_pawpilot.core.arbiter import Arbiter  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.challenge import Challenge  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.config_model import PawpilotConfig  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.event_catalog import EVENT_CATALOG, spec  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.knowledge import KnowledgeBase  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.ledger import Ledger  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.memory import MemoryStore  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.mood import Persona  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.proactive import Proactive  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.profile import DriverProfile  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.recall import Recall  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.safety_guard import SafetyGuard  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.scenario import (HIGHWAY, IDLE, URBAN, ScenarioMachine)  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.small_talk import SmallTalk  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.templates import EmotionRenderer  # noqa: E402
-from plugin.plugins.neko_pawpilot.core.trip_summary import TripSummary  # noqa: E402
-from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot  # noqa: E402
 
 TMP = pathlib.Path(__file__).parent / ".tmp_pawpilot_test"
 
@@ -320,7 +316,9 @@ def test_small_talk():
 
 
 def test_telemetry_installer():
-    from plugin.plugins.neko_pawpilot.adapters.telemetry_installer import TelemetryInstaller
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_installer import (
+        TelemetryInstaller,
+    )
     ti = TelemetryInstaller()
     assert ti.bundled_available(), "插件必须捆绑 scs-telemetry.dll"
     assert len(ti.bundled_hash()) == 64
@@ -350,6 +348,7 @@ def test_runtime_start_smoke():
     """runtime.start() 全链路：防 AttributeError 类启动回归。"""
     import asyncio
     import logging
+
     from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
 
     class _FakePlugin:
@@ -372,6 +371,7 @@ def test_runtime_start_smoke():
 def test_push_sender_sync_contract():
     """push_message 是 SDK 同步方法（返回 dict），push_sender 不得 await 它。"""
     import asyncio
+
     from plugin.plugins.neko_pawpilot.adapters.push_sender import PushSender
 
     class _FakePlugin:
@@ -403,6 +403,7 @@ def test_push_sender_sync_contract():
 def test_traffic_light_proposal():
     """红绿灯路况提议：接近触发 / 冷却挡 / 离开重触发。"""
     import time as _time
+
     from plugin.plugins.neko_pawpilot.core.map_kb import MapKnowledge
     from plugin.plugins.neko_pawpilot.core.proactive import Proactive
 
@@ -435,6 +436,7 @@ def test_traffic_light_proposal():
 def test_station_proposal():
     """加油站/服务区接近提议：低油量→加油，长途→休息，冷却+重置。"""
     import time as _time
+
     from plugin.plugins.neko_pawpilot.core.map_kb import MapKnowledge
     from plugin.plugins.neko_pawpilot.core.proactive import Proactive
 
@@ -572,7 +574,10 @@ def test_events_fire_without_job():
 def test_distance_marks():
     """距离分级锚点：按任务里程自动生成，长/短途各有合理分级。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
-    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine, _gen_distance_anchors
+    from plugin.plugins.neko_pawpilot.core.event_engine import (
+        EventEngine,
+        _gen_distance_anchors,
+    )
 
     # 锚点自动生成验证
     assert _gen_distance_anchors(500) == (250, 125, 50, 25, 12, 5)
@@ -610,6 +615,7 @@ def test_distance_marks():
 def test_settings_persistence():
     """面板设置（dry_run/频率/类别）保存后可恢复。"""
     import asyncio
+
     from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
 
     async def _run():
@@ -704,6 +710,7 @@ def test_voice_style_multi():
 def test_llm_fallback_chain():
     """LLM 三级链路：未配置→None，配置→尝试调用，失败→自动降级。"""
     import asyncio
+
     from plugin.plugins.neko_pawpilot.adapters.llm_client import LLMProvider
 
     async def _run():
@@ -790,6 +797,7 @@ def test_cat_pilot_snatch_limit():
 def test_memory_written_on_job_start():
     """接单即写入城市/货物记忆（不依赖推送仲裁）。"""
     import asyncio
+
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
     from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine, TruckEvent
     from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime

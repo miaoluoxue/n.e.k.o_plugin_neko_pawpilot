@@ -43,9 +43,8 @@ class LLMClient:
         self.timeout = timeout
 
     async def call(self, prompt: str) -> str:
-        try:
-            import httpx
-        except ImportError:
+        import importlib.util
+        if importlib.util.find_spec("httpx") is None:
             raise RuntimeError("需要 httpx")
         if self.provider in ("openai", "openai_compatible", "deepseek"):
             url = self.base_url or "https://api.openai.com/v1/chat/completions"

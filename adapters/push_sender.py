@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
 
 class PushSender:

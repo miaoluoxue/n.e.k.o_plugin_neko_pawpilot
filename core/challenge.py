@@ -66,8 +66,6 @@ class Challenge:
             win = count == 0
             line = (CHALLENGE_WIN if win else CHALLENGE_LOSE)["brake"].format(count=count)
         # 输赢记录进关系记忆
-        wins = self.memory.query("relationship", "challenge_wins") or {"count": 0}
-        losses = self.memory.query("relationship", "challenge_losses") or {"count": 0}
         key = "challenge_wins" if win else "challenge_losses"
         entry = self.memory.query("relationship", key) or {"count": 0}
         self.memory.remember("relationship", key, {"count": int(entry.get("count", 0)) + 1},

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .mood import Persona
 

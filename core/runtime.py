@@ -5,19 +5,26 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, Optional
 
+from ..adapters.llm_client import LLMProvider
+from ..adapters.map_parser import MapParser
+from ..adapters.push_sender import PushSender
+from ..adapters.telemetry_client import TelemetryReader
+from ..adapters.telemetry_installer import TelemetryInstaller
+from ..catgirl.bridge import CatgirlBridge
 from .arbiter import Arbiter
 from .challenge import Challenge
 from .config_model import PawpilotConfig
 from .event_engine import EventEngine, TruckEvent
+from .knowledge import KnowledgeBase
 from .ledger import Ledger
 from .level_celebrate import LevelCelebrate
 from .map_kb import MapKnowledge
 from .memory import MemoryStore
 from .mood import Persona
+from .photo_album import PhotoAlbum
 from .pilot import CatPilot
 from .proactive import Proactive
 from .profile import DriverProfile
-from .photo_album import PhotoAlbum
 from .recall import Recall
 from .route_planner import RoutePlanner
 from .safety_guard import SafetyGuard
@@ -25,13 +32,6 @@ from .scene_chat import SceneChat
 from .small_talk import SmallTalk
 from .templates import EmotionRenderer
 from .trip_summary import TripSummary
-from .knowledge import KnowledgeBase
-from ..adapters.push_sender import PushSender
-from ..adapters.map_parser import MapParser
-from ..adapters.telemetry_client import TelemetryReader
-from ..adapters.telemetry_installer import TelemetryInstaller
-from ..adapters.llm_client import LLMProvider
-from ..catgirl.bridge import CatgirlBridge
 
 ACTIVITY_TITLES = {
     "speeding": "超速",

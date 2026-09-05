@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import (c_bool, c_char, c_double, c_float, c_int, c_longlong,
-                    c_uint, c_ulonglong)
+from ctypes import (
+    c_bool,
+    c_char,
+    c_double,
+    c_float,
+    c_int,
+    c_longlong,
+    c_uint,
+    c_ulonglong,
+)
 from dataclasses import dataclass
 from typing import Optional
 
