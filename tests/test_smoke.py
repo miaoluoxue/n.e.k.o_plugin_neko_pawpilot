@@ -746,6 +746,8 @@ def test_cat_pilot_snatch_limit():
         user_brake = 0.0
 
     p = CatPilot()
+    p._pdi = object()  # 测试桩：标记输入组件"可用"（真实 pydirectinput 仅 Windows，
+                       # Linux CI 导入失败会令 offer() 误判不可用直接返回）
     p.offer()
     assert p.state == "offer"
     p.accept()
