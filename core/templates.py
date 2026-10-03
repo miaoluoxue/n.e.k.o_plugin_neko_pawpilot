@@ -13,7 +13,8 @@ from .mood import Persona
 FACT_TEMPLATES = {
     "speeding": "主人正在超速行驶，当前 {speed:.0f} km/h，限速 {limit:.0f} km/h",
     "hard_brake": "主人刚才急刹车了（{speed:.0f} km/h 突然刹停）",
-    "crash": "主人出车祸了，车辆损伤：{parts}",
+    "crash": "主人出车祸了，车辆损伤：{parts}（撞击时 {speed:.0f} km/h）",
+    "vehicle_damage": "车辆累计损伤已到 {percent:.0f}%（{parts}），该考虑修车了",
     "job_start": "主人接了一单：{cargo}，从 {src} 到 {dst}，全程 {km} km",
     "job_delivered": "主人完成送货，收入 {revenue} €",
     "job_cancelled": "主人取消了任务，被扣 {penalty} €",
@@ -40,6 +41,7 @@ SHORT_LINES = {
     "speeding": ["超速了喵！{speed:.0f} / 限速 {limit:.0f} km/h"],
     "hard_brake": ["急刹！{speed:.0f} km/h 突然刹停，吓我一跳喵"],
     "crash": ["！！撞了！！喵呜你没事吧？！损伤：{parts}"],
+    "vehicle_damage": ["车损累计到 {percent:.0f}% 了喵… 该去修车了吧？"],
     "job_start": ["接了 {cargo}，{src} → {dst}，{km} km 喵！出发！"],
     "job_delivered": ["到货结算喵！收入 {revenue} €"],
     "job_cancelled": ["任务取消了喵？扣了 {penalty} €…"],

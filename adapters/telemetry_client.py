@@ -375,6 +375,9 @@ class TruckSnapshot:
     route_time_min: float = 0.0
     speed_limit_mps: float = 0.0
     job_cargo_damage: float = 0.0
+    accel_x: float = 0.0
+    accel_y: float = 0.0
+    accel_z: float = 0.0
     is_cargo_loaded: bool = False
     park_brake: bool = False
     engine_enabled: bool = False
@@ -433,6 +436,26 @@ class TruckSnapshot:
                    self.wear_cabin, self.wear_chassis, self.wear_wheels)
 
     @property
+    def accel_g(self) -> float:
+        """三轴加速度合成（g）——碰撞的物理信号，比"损伤突增"更灵敏。
+
+        SCS SDK 的 truck_fv.acceleration* 单位是 m/s²，除以 9.80665 换 g。
+        """
+        mag = (self.accel_x ** 2 + self.accel_y ** 2 + self.accel_z ** 2) ** 0.5
+        return mag / 9.80665
+
+    @property
+    def cargo_damage(self) -> float:
+        """货物实时损伤（0=完好，1=全损）——取 job 与挂车两路的较大值。
+
+        ETS2 的货箱挂在挂车上：SCS SDK 的 job_f.cargoDamage 在部分版本只在
+        "交付结算" 时才写入，途中真实的货损写在 trailer.com_f.cargoDamage。
+        历史上事件层只读 job_cargo_damage → 途中撞坏货也一直是 0，货损永不
+        播报（"货损没反应"）。两路取大值后，任一通道给出损伤都能感知到。
+        """
+        return max(self.job_cargo_damage, self.trailer_cargo_damage)
+
+    @property
     def damage_parts(self) -> dict:
         return {
             "engine": self.wear_engine, "transmission": self.wear_transmission,
@@ -479,6 +502,8 @@ class TruckSnapshot:
         d["is_speeding"] = self.is_speeding
         d["fuel_percent"] = self.fuel_percent
         d["max_damage"] = self.max_damage
+        d["cargo_damage"] = self.cargo_damage
+        d["accel_g"] = round(self.accel_g, 2)
         d["damage_parts"] = self.damage_parts
         d["power_type"] = self.power_type
         d["route_remaining_km"] = self.route_remaining_km
@@ -585,6 +610,10 @@ class TelemetryReader:
         s.route_time_min = tf.routeTime
         s.speed_limit_mps = tf.speedLimit
         s.job_cargo_damage = m.job_f.cargoDamage
+        tv = m.truck_fv
+        s.accel_x = tv.accelerationX
+        s.accel_y = tv.accelerationY
+        s.accel_z = tv.accelerationZ
         cb = m.config_b
         s.is_cargo_loaded = bool(cb.isCargoLoaded)
         tb = m.truck_b

@@ -47,6 +47,12 @@ EV_TIME_RELAXED = "time_relaxed"    # 时间充裕
 EV_TIME_TIGHT = "time_tight"        # 时间紧张
 EV_EARLY_ARRIVAL = "early_arrival"  # 到货提前
 EV_CARGO_DAMAGE = "cargo_damage"    # 货物完好率跌破阈值
+EV_VEHICLE_DAMAGE = "vehicle_damage"  # 车损累计跨档（非碰撞突增）
+
+# 货损播报档位（损伤 0-1）：完好率跌破 95% 起报，恶化到 80%/50% 再报
+CARGO_DAMAGE_BANDS = (0.05, 0.20, 0.50)
+# 车损播报档位（损伤 0-1）：25%/50%/75% 各报一次（修车后重新武装）
+VEHICLE_DAMAGE_BANDS = (0.25, 0.50, 0.75)
 
 
 @dataclass
@@ -66,6 +72,7 @@ class EventEngine:
         self.speeding_reset_s = config.speeding_reset_s
         self.speeding_escalate_kmh = config.speeding_escalate_kmh
         self.crash_delta = config.crash_damage_delta
+        self.crash_accel_g = float(getattr(config, "crash_accel_g", 0.0) or 0.0)
         self.brake_force = config.hard_brake_force
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
@@ -79,6 +86,8 @@ class EventEngine:
         self._warned_relaxed = False
         self._warned_tight = False
         self._warned_cargo = False
+        self._cargo_band = 0        # 已播报到的货损档位（0=未报，1=报过 5%…）
+        self._vehicle_band = 0      # 已播报到的车损档位
         self._warned_early = False
         self._progress_fired: dict = {}
         self._distance_fired: dict = {}
@@ -95,6 +104,7 @@ class EventEngine:
         self.speeding_reset_s = config.speeding_reset_s
         self.speeding_escalate_kmh = config.speeding_escalate_kmh
         self.crash_delta = config.crash_damage_delta
+        self.crash_accel_g = float(getattr(config, "crash_accel_g", 0.0) or 0.0)
         self.brake_force = config.hard_brake_force
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
@@ -156,12 +166,29 @@ class EventEngine:
             if ev:
                 out.append(ev)
 
+        crash_reason = ""
         if self._damage_last is not None:
             delta = s.max_damage - self._damage_last
             if delta > self.crash_delta:
-                ev = self._emit(EV_CRASH, s, {"delta": delta})
-                if ev:
-                    out.append(ev)
+                crash_reason = "damage"
+        # 加速度信号（可选，config.crash_accel_g > 0 才启用）：轻刮蹭损伤不足
+        # 5% 时"损伤突增"抓不到，但撞击的加速度尖峰抓得到
+        if not crash_reason and self.crash_accel_g > 0 and s.accel_g >= self.crash_accel_g:
+            crash_reason = "accel"
+        if crash_reason:
+            ev = self._emit(EV_CRASH, s, {
+                "delta": (s.max_damage - self._damage_last)
+                if self._damage_last is not None else 0.0,
+                "damage": s.max_damage,
+                "speed_kmh": s.speed_kmh,
+                "accel_g": round(s.accel_g, 2),
+                "source": crash_reason,
+                "parts": ", ".join(
+                    f"{k} {v * 100:.0f}%" for k, v in s.damage_parts.items()
+                    if v > 0.01),
+            })
+            if ev:
+                out.append(ev)
         self._damage_last = s.max_damage
 
         if s.ev_refuel_payed and (prev is None or not prev.ev_refuel_payed):
@@ -232,7 +259,7 @@ class EventEngine:
                 self._warned_over_time = False
                 self._warned_relaxed = False
                 self._warned_tight = False
-                self._warned_cargo = False
+                self._cargo_band = 0          # 新货：货损播报档位重置
                 self._warned_early = False
                 self._distance_fired = {}
                 self._distance_init = None
@@ -276,14 +303,47 @@ class EventEngine:
                         out.append(ev)
                     self._warned_tight = True
 
-        # 货物完好率跌破阈值（接货时 100% → 途中跌破 95% 提醒一次）
-        if s.on_job and prev is not None and not self._warned_cargo:
-            if 0 < s.job_cargo_damage < 0.05:
-                ev = self._emit(EV_CARGO_DAMAGE, s, {"pct": (1 - s.job_cargo_damage) * 100},
-                                force=True)
-                if ev:
-                    out.append(ev)
-                self._warned_cargo = True
+        # 货物完好率跌破阈值（接货 100% → 途中跌破 95% 起报，继续恶化再报）
+        # 修复三处历史 bug：
+        #   1) 旧条件 `0 < job_cargo_damage < 0.05` 把语义写反了——只在"损伤
+        #      不足 5%"时触发，真正的货损（≥5%，如撞车导致）反而永不播报；
+        #   2) 只读 job_cargo_damage，漏掉写在挂车上的实时货损（见
+        #      TruckSnapshot.cargo_damage 两路取大值）；
+        #   3) 一次性 boolean 播报后永久静默，货损从 5% 恶化到 50% 也不再提醒。
+        if s.on_job and prev is not None:
+            dmg = s.cargo_damage
+            for idx, band in enumerate(CARGO_DAMAGE_BANDS):
+                if dmg >= band and self._cargo_band <= idx:
+                    self._cargo_band = idx + 1
+                    ev = self._emit(EV_CARGO_DAMAGE, s, {
+                        "damage": dmg,
+                        "pct": max(0.0, (1.0 - dmg) * 100.0),
+                        "threshold": band,
+                    }, force=True)
+                    if ev:
+                        out.append(ev)
+                    break
+
+        # 车损累计跨档（旧版只有 crash 突增检测：多次小刮蹭/磨损累积到 40%
+        # 也不说话，主人根本不知道车该修了）。修车/换车后损伤回落 → 重新武装。
+        vehicle_dmg = s.max_damage
+        if vehicle_dmg < VEHICLE_DAMAGE_BANDS[0]:
+            self._vehicle_band = 0
+        else:
+            parts = ", ".join(f"{k} {v * 100:.0f}%" for k, v in s.damage_parts.items()
+                              if v > 0.01)
+            for idx, band in enumerate(VEHICLE_DAMAGE_BANDS):
+                if vehicle_dmg >= band and self._vehicle_band <= idx:
+                    self._vehicle_band = idx + 1
+                    ev = self._emit(EV_VEHICLE_DAMAGE, s, {
+                        "damage": vehicle_dmg,
+                        "percent": vehicle_dmg * 100.0,
+                        "parts": parts,
+                        "threshold": band,
+                    }, force=True)
+                    if ev:
+                        out.append(ev)
+                    break
 
         # 到货提前（交付时间余量仍大 + 即将到货）
         if s.on_job and s.ev_job_delivered and not self._warned_early:

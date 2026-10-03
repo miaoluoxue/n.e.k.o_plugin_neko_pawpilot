@@ -18,6 +18,10 @@ DEFAULTS = {
     "time_warn_min": 60,
     "low_fuel_percent": 15,
     "crash_damage_delta": 0.05,
+    # 碰撞加速度信号（g）：0 = 关闭。ETS2 里轻微刮蹭可能不足 5% 损伤，
+    # 加速度尖峰更灵敏；但各人机器手感不同，默认关闭，先在面板看 accel_g
+    # 峰值再决定阈值（建议 2.5-4）。
+    "crash_accel_g": 0.0,
     "hard_brake_force": 0.9,
     "hard_brake_speed_kmh": 60,
     "push_visibility": ["chat"],
@@ -70,6 +74,7 @@ class PawpilotConfig:
         self.time_warn_min = int(data.get("time_warn_min", DEFAULTS["time_warn_min"]))
         self.low_fuel_percent = float(data.get("low_fuel_percent", DEFAULTS["low_fuel_percent"]))
         self.crash_damage_delta = float(data.get("crash_damage_delta", DEFAULTS["crash_damage_delta"]))
+        self.crash_accel_g = float(data.get("crash_accel_g", DEFAULTS["crash_accel_g"]))
         self.hard_brake_force = float(data.get("hard_brake_force", DEFAULTS["hard_brake_force"]))
         self.hard_brake_speed_kmh = float(data.get("hard_brake_speed_kmh", DEFAULTS["hard_brake_speed_kmh"]))
         self.push_visibility = list(data.get("push_visibility", DEFAULTS["push_visibility"]))

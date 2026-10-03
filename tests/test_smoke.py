@@ -839,6 +839,179 @@ def test_memory_written_on_job_start():
     assert "玻璃制品" in cargos, "到货应记录货物"
 
 
+def test_cargo_damage_threshold_regression():
+    """货损感知：≥5% 才报（旧条件写反成"<5%"→ 真货损永不播报），恶化再报。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    eng = EventEngine(PawpilotConfig())
+    fired = []
+    eng.on_event(lambda ev: fired.append((ev.name, ev.data)))
+
+    def mk(**kw):
+        s = TruckSnapshot()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    def cargo_hits():
+        return [d for n, d in fired if n == "cargo_damage"]
+
+    eng.feed(mk(sdk_active=True, on_job=True))
+    # 轻微擦碰（3% < 5%）不报
+    eng.feed(mk(sdk_active=True, on_job=True, job_cargo_damage=0.03))
+    assert not cargo_hits(), "货损未达 5% 不该播报"
+    # 真实货损 8%（旧代码正是在这里静默）→ 必须播报，且完好率 <95%
+    eng.feed(mk(sdk_active=True, on_job=True, job_cargo_damage=0.08))
+    hits = cargo_hits()
+    assert hits, "货损 ≥5% 必须播报（旧版条件写反导致永不触发）"
+    assert hits[-1]["pct"] < 95, f"完好率应低于 95%，实际 {hits[-1]['pct']}"
+    # 恶化到 25% → 再报一次（旧版一次性 boolean 后永久静默）
+    eng.feed(mk(sdk_active=True, on_job=True, job_cargo_damage=0.25))
+    assert len(cargo_hits()) == 2, "货损继续恶化应再播报一次"
+
+
+def test_cargo_damage_reads_trailer_channel():
+    """货损感知：挂在挂车上的实时货损（trailer 通道）也必须能触发。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    # 取值层：两路取大
+    s = TruckSnapshot()
+    s.job_cargo_damage = 0.0
+    s.trailer_cargo_damage = 0.42
+    assert abs(s.cargo_damage - 0.42) < 1e-9, "应取挂车通道的货损"
+    assert s.to_dict()["cargo_damage"] == s.cargo_damage
+
+    # 事件层：只有挂车通道有值时也要报
+    eng = EventEngine(PawpilotConfig())
+    names = []
+    eng.on_event(lambda ev: names.append(ev.name))
+
+    def mk(**kw):
+        t = TruckSnapshot()
+        for k, v in kw.items():
+            setattr(t, k, v)
+        return t
+
+    eng.feed(mk(sdk_active=True, on_job=True))
+    eng.feed(mk(sdk_active=True, on_job=True, trailer_cargo_damage=0.4))
+    assert "cargo_damage" in names, "只看 job 通道会漏掉挂在挂车上的货损"
+
+
+def test_vehicle_damage_band_event():
+    """车损：累计损伤跨档要说话（旧版只有碰撞突增），修车后重新武装。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.event_catalog import spec
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    assert "vehicle_damage" in EVENT_CATALOG, "车损事件需在规格表登记"
+    assert spec("vehicle_damage").category == "safety"
+
+    eng = EventEngine(PawpilotConfig())
+    hits = []
+    eng.on_event(lambda ev: hits.append(ev.data) if ev.name == "vehicle_damage" else None)
+
+    def mk(**kw):
+        s = TruckSnapshot()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    eng.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.10))
+    assert not hits, "10% 未到 25% 档不该报"
+    eng.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.30))
+    assert hits and hits[-1]["percent"] >= 25, "30% 应触发车损播报"
+    eng.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.55))
+    assert len(hits) == 2, "恶化到 50% 档应再报"
+    # 修车（损伤回落）→ 重新武装，再次跨档还要报
+    eng.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.05))
+    eng.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.30))
+    assert len(hits) == 3, "修车后重新跨档应再次播报"
+
+
+def test_crash_reports_once_via_llm():
+    """事故：只计一次（旧版重复计数）+ 必走 respond（交宿主 LLM 说话）。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.event_engine import TruckEvent
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    class _PushPlugin(_FakePluginForRt):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def push_message(self, **kw):
+            self.calls.append(kw)
+            return {"submitted": True}
+
+    async def _run():
+        import asyncio as _asyncio
+        fp = _PushPlugin()
+        rt = PawpilotRuntime(fp, PawpilotConfig())
+        rt.set_dry_run(False)  # 关试运行，让推送真正落到 push_message
+        rt._bg_loop_ref = _asyncio.get_running_loop()
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.on_job = True
+        s.speed_mps = 20.0
+        s.wear_cabin = 0.42
+        rt._on_event(TruckEvent(name="crash", snapshot=s,
+                                data={"delta": 0.3, "speed_kmh": 72.0}))
+        await asyncio.sleep(0.1)
+        crashed = rt._job_crashes
+        calls = list(fp.calls)
+        # 事故链会 sleep 30s：断言后取消，别拖住测试
+        for t in asyncio.all_tasks():
+            if t is not _asyncio.current_task():
+                t.cancel()
+        return crashed, calls
+
+    crashed, calls = asyncio.run(_run())
+    assert crashed == 1, f"单次事故只能计一次，实际 {crashed}"
+    respond = [c for c in calls if c.get("ai_behavior") == "respond"]
+    assert respond, "事故必须走 respond 交宿主 LLM 生成台词（旧版只直出硬编码短句）"
+    text = respond[0]["parts"][0]["text"]
+    assert "车祸" in text and "42" in text, f"事实行应含事故与损伤，实际：{text}"
+
+
+def test_crash_accel_channel_opt_in():
+    """碰撞加速度通道：默认关闭（不误报），开启后能抓到"损伤不足 5%"的撞击。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    def mk(**kw):
+        s = TruckSnapshot()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    # 默认（crash_accel_g=0）：加速度尖峰不触发碰撞
+    eng = EventEngine(PawpilotConfig())
+    names = []
+    eng.on_event(lambda ev: names.append(ev.name))
+    eng.feed(mk(sdk_active=True, on_job=True, accel_x=30.0))
+    eng.feed(mk(sdk_active=True, on_job=True, accel_x=30.0, wear_cabin=0.02))
+    assert "crash" not in names, "未校准前默认不应凭加速度误报碰撞"
+
+    # 开启后（阈值 3g）：30 m/s² ≈ 3.06g → 触发，且标记来源为 accel
+    raw = {"crash_accel_g": 3.0}
+    eng2 = EventEngine(PawpilotConfig(raw))
+    hits = []
+    eng2.on_event(lambda ev: hits.append(ev.data) if ev.name == "crash" else None)
+    eng2.feed(mk(sdk_active=True, on_job=True))
+    eng2.feed(mk(sdk_active=True, on_job=True, accel_x=30.0))
+    assert hits, "开启加速度通道后撞击应被识别"
+    assert hits[-1]["source"] == "accel"
+    assert hits[-1]["accel_g"] >= 3.0
+    # 合成值换算：30 m/s² ≈ 3.06 g
+    s = TruckSnapshot()
+    s.accel_x = 30.0
+    assert 3.0 < s.accel_g < 3.2
+
+
 if __name__ == "__main__":
     test_manifest()
     print("manifest OK")

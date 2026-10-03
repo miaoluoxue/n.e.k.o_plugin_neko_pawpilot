@@ -40,6 +40,7 @@ class EventSpec:
 EVENT_CATALOG: dict[str, EventSpec] = {
     "crash":          EventSpec("crash", CAT_SAFETY, 9, True, 15),
     "hard_brake":     EventSpec("hard_brake", CAT_SAFETY, 6, False, 20),
+    "vehicle_damage": EventSpec("vehicle_damage", CAT_SAFETY, 6, False, 60),
     "speeding":       EventSpec("speeding", CAT_SAFETY, 5, False, 30),
     "low_fuel":       EventSpec("low_fuel", CAT_SAFETY, 5, False, -1),
     "time_warning":   EventSpec("time_warning", CAT_TASK, 6, False, 120),
@@ -59,7 +60,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "time_relaxed":   EventSpec("time_relaxed", CAT_TASK, 3, False, -1),
     "time_tight":     EventSpec("time_tight", CAT_TASK, 5, False, -1),
     "early_arrival":  EventSpec("early_arrival", CAT_TASK, 4, False, -1),
-    "cargo_damage":   EventSpec("cargo_damage", CAT_TASK, 5, False, -1),
+    "cargo_damage":   EventSpec("cargo_damage", CAT_TASK, 6, False, 30),
 }
 
 

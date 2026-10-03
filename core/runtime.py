@@ -441,7 +441,13 @@ class PawpilotRuntime:
             "remaining_km": round(s.route_remaining_km, 1),
             "delivery_remaining_min": s.delivery_remaining_min,
             "damage": round(s.max_damage * 100, 1),
-            "cargo_damage": round(s.job_cargo_damage, 3),
+            # 面板/排查用：给出"生效货损"（两路取大）与两路原始值，便于现场
+            # 判断 SCS SDK 到底把实时货损写在 job 还是 trailer 通道
+            "cargo_damage": round(s.cargo_damage, 3),
+            "cargo_damage_job": round(s.job_cargo_damage, 3),
+            "cargo_damage_trailer": round(s.trailer_cargo_damage, 3),
+            # 碰撞校准用：面板实时显示加速度合成值（g），据此设 crash_accel_g
+            "accel_g": round(s.accel_g, 2),
             "recent_activity": self._activity[:20],
             "world": {"x": round(s.world_x, 1), "z": round(s.world_z, 1)},
         })
@@ -665,18 +671,21 @@ class PawpilotRuntime:
                 self._spawn(self.push.push_direct("\n".join(lines)))
             return
         if ev.name == "crash":
-            self._job_crashes += 1
+            # 计数已由 _track_stats 记一次（此处再 +1 会把单次事故计成两次）
             crash_hint = self.recall.on_crash()
+            snap = ev.snapshot
             parts = ", ".join(f"{k} {v * 100:.0f}%" for k, v in
-                              ev.snapshot.damage_parts.items() if v > 0.01)
-            lines = []
+                              snap.damage_parts.items() if v > 0.01)
+            # 事故必走 respond（事实行交宿主 LLM 按人设说话）：旧版只 push_direct
+            # 直出硬编码短句，猫娘"没有 llm 对话"，主人听不到她的声音。
+            self._spawn(self.push.push_fact(self.emotion.fact_prompt(
+                "crash",
+                parts=parts or "无明显损伤",
+                speed=float(ev.data.get("speed_kmh", snap.speed_kmh)),
+            )))
             if crash_hint:
-                lines.append(self.persona.polish(crash_hint))
-            line = self.catgirl.existence_line("crash", parts=parts)
-            if line:
-                lines.append(self.persona.polish(line))
-            if lines:
-                self._spawn(self.push.push_direct("\n".join(lines)))
+                self._spawn(self.push.push_fact(
+                    self.emotion.custom_fact(crash_hint, "crash")))
             self._spawn(self._crash_chain(ev))
             return
         if ev.name == "job_delivered" and ev.snapshot:
@@ -724,7 +733,11 @@ class PawpilotRuntime:
         self._job_start_ts = __import__("time").time()
 
     async def _crash_chain(self, ev: TruckEvent) -> None:
-        """事故叙事链：伤情检查 → 维修评估/救援 → 事后安慰（L1 时间轴）。"""
+        """事故叙事链：伤情检查 → 维修评估/救援 → 事后安慰（L1 时间轴）。
+
+        三个阶段全部走 respond（事实行 → 宿主 LLM 按人设演绎）。旧版是三段
+        push_direct 硬编码台词，主人听不到猫娘自己的话（"车祸没有 llm 对话"）。
+        """
         snap = ev.snapshot
         damage = snap.max_damage
         parts_detail = ", ".join(
@@ -732,20 +745,19 @@ class PawpilotRuntime:
         # 伤情检查（5s 后）
         await asyncio.sleep(5)
         if damage >= 0.5:
-            await self.push.push_direct(
-                self.persona.polish("这撞得太重了喵！先靠边停，别硬开了！"))
-            await self.push.push_direct(
-                self.persona.polish("车这样别硬开了喵… 叫救援拖车吧，200€ 认了，命要紧"))
+            await self.push.push_fact(self.emotion.custom_fact(
+                f"事故伤情检查：车辆损伤 {damage * 100:.0f}%（{parts_detail}），"
+                f"损伤过半，继续开会持续恶化，该靠边停车叫救援拖车", "crash"))
         else:
-            await self.push.push_direct(
-                self.persona.polish(f"让我看看… {parts_detail}，还好还好~"))
             repair = round(damage * 1000)
-            await self.push.push_direct(
-                self.persona.polish(f"修车大概要 {repair} € 喵… 以后见到弯道慢点呀"))
+            await self.push.push_fact(self.emotion.custom_fact(
+                f"事故伤情检查：车辆损伤 {damage * 100:.0f}%（{parts_detail}），"
+                f"修车预估 {repair} €，顺口提醒主人过弯慢一点", "crash"))
         # 事后安慰（30s 后）
         await asyncio.sleep(25)
-        await self.push.push_direct(
-            self.persona.polish("没大事就好… 我陪着你呢，慢慢开，不着急喵 💕"))
+        await self.push.push_fact(self.emotion.custom_fact(
+            "事故已过 30 秒，主人仍在正常行驶、情绪平稳：安抚一句，"
+            "提示慢慢开不着急", "crash"))
 
     def _track_stats(self, ev: TruckEvent) -> None:
         """累计行程统计。"""
@@ -934,6 +946,12 @@ class PawpilotRuntime:
             return self.emotion.fact_prompt(ev.name, min=ev.data.get("min", 0))
         if ev.name == "cargo_damage":
             return self.emotion.fact_prompt(ev.name, pct=ev.data.get("pct", 0))
+        if ev.name == "vehicle_damage":
+            return self.emotion.fact_prompt(
+                ev.name,
+                percent=ev.data.get("percent", 0.0),
+                parts=ev.data.get("parts", ""),
+            )
         return None
 
     def _greeting(self) -> str:

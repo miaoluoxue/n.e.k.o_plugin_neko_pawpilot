@@ -8,6 +8,7 @@
   "time_warn_min": 60,
   "low_fuel_percent": 15,
   "crash_damage_delta": 0.05,
+  "crash_accel_g": 0.0,
   "hard_brake_force": 0.9,
   "hard_brake_speed_kmh": 60,
   "push_visibility": ["chat"],
