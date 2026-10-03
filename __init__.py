@@ -334,26 +334,6 @@ class NekoPawpilotPlugin(NekoPluginBase):
             self.logger.warning("install_telemetry failed: %s", exc)
             return Err(SdkError("导入遥测文件失败喵"))
 
-    @ui.action(id="reparse_map", label="重新解析地图", tone="primary", group="diagnostics", order=32, refresh_context=True)
-    @plugin_entry(
-        id="reparse_map",
-        name="重新解析地图",
-        description="用 TruckLib 重新解析游戏地图，更新道路/设施/红绿灯知识库（耗时长，需游戏已安装）。玩家说解析地图/更新地图/重建地图数据时调用。",
-        input_schema={"type": "object", "properties": {}},
-    )
-    async def action_reparse_map(self, **_) -> Any:
-        """手动重新解析地图知识库。"""
-        try:
-            if not self.rt:
-                return Err(SdkError("猫爪副驾还没准备好喵"))
-            result = await self.rt.reparse_map()
-            if result.get("ok"):
-                return Ok(result)
-            return Err(SdkError(result.get("detail", "地图解析失败喵")))
-        except Exception as exc:
-            self.logger.warning("reparse_map failed: %s", exc)
-            return Err(SdkError("重新解析地图失败喵"))
-
     @plugin_entry(id="get_panel_state", name="获取面板状态",
                   description="供面板轮询的完整状态入口。",
                   input_schema={"type": "object", "properties": {}},

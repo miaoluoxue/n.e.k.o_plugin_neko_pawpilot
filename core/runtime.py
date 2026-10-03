@@ -6,7 +6,6 @@ import asyncio
 from typing import Any, Dict, Optional
 
 from ..adapters.llm_client import LLMProvider
-from ..adapters.map_parser import MapParser
 from ..adapters.push_sender import PushSender
 from ..adapters.telemetry_client import TelemetryReader
 from ..adapters.telemetry_installer import TelemetryInstaller
@@ -95,7 +94,6 @@ class PawpilotRuntime:
             plugin_rel=config.telemetry_plugin_rel,
             bundle_rel=config.telemetry_bundle_rel)
         self.telemetry_install_state: Dict[str, str] = {}
-        self.map_parser = MapParser(plugin)
         self._game_dir: Optional[str] = None
         self.ocr_regions = self._load_ocr_regions()
         self.hud_ocr = None  # 惰性：OCR 可用时创建
@@ -289,7 +287,6 @@ class PawpilotRuntime:
         self._bg_thread.start()
         self._game_dir = self.telemetry_installer.detect_game_dir()
         self.telemetry_install_state = self.telemetry_installer.install(self._game_dir)
-        self._check_map_version()
         return {"status": "ready", "telemetry": self._probe_telemetry(),
                 "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot(),
                 "llm": self.llm.snapshot()}
@@ -342,49 +339,6 @@ class PawpilotRuntime:
             self.plugin.logger.info("未配置 LLM，情感渲染用模板兜底")
         return {"status": "ready", "telemetry": self._probe_telemetry(),
                 "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot()}
-
-    def _check_map_version(self) -> None:
-        """自动检测：地图知识库版本与游戏版本匹配性。"""
-        game_version = self._game_version()
-        kb = self.map_kb.snapshot()
-        if game_version and kb.get("loaded") and game_version not in kb.get("version", ""):
-            self.plugin.logger.info(
-                "游戏版本 %s 与地图知识库 %s 不匹配，可重新解析", game_version, kb.get("version"))
-
-    def _game_version(self) -> str:
-        """读游戏版本（game.log 或 version.scs 首行）。"""
-        try:
-            from pathlib import Path
-            doc = Path.home() / "Documents" / "Euro Truck Simulator 2" / "game.log.txt"
-            if doc.exists():
-                for line in doc.read_text(encoding="utf-8", errors="ignore").splitlines()[:20]:
-                    if "version" in line.lower() and "1." in line:
-                        return line.strip()
-        except Exception:
-            pass
-        return ""
-
-    async def reparse_map(self) -> Dict[str, Any]:
-        """手动触发地图解析：运行提取器并重新加载知识库（耗时，后台执行）。"""
-        from pathlib import Path
-        if not self.map_parser.extractor_available():
-            return {"ok": False, "detail": "地图提取器不可用（缺编译产物）"}
-        if not self._game_dir:
-            self._game_dir = self.map_parser.detect_game_dir()
-        if not self._game_dir:
-            return {"ok": False, "detail": "未找到欧卡2安装目录"}
-        out = Path(__file__).resolve().parent.parent / "data" / "map" / "map_kb.json"
-        try:
-            ok = await asyncio.to_thread(self.map_parser.extract, out, self._game_dir)
-            if not ok:
-                return {"ok": False, "detail": "地图解析失败（检查游戏目录权限）"}
-            self.map_kb.reload()
-            return {"ok": True,
-                    "detail": f"解析完成：{self.map_kb.snapshot().get('facilities', 0)} 设施",
-                    "map": self.map_kb.snapshot()}
-        except Exception as exc:
-            self.plugin.logger.exception("reparse failed")
-            return {"ok": False, "detail": f"地图解析异常: {exc}"}
 
     def install_telemetry(self) -> Dict[str, str]:
         """手动触发遥测文件写入（复用已探测的游戏目录）。"""

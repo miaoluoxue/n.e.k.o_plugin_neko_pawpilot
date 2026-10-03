@@ -13,9 +13,6 @@ exclude_dirs = [
     ".pytest_cache",
     ".ruff_cache",
     "tests",
-    "adapters/map_extractor/bin",
-    "adapters/map_extractor/obj",
-    "adapters/map_extractor/publish",
 ]
 exclude_files = [
     ".gitignore",

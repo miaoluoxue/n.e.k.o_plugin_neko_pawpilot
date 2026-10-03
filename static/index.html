@@ -221,7 +221,6 @@ body::before {
   <div id="view-diagnostics" style="display:none;">
     <div class="btn-group" style="margin-bottom:14px;">
       <button class="btn btn-accent" onclick="installTelemetry()">📥 导入遥测文件</button>
-      <button class="btn btn-ghost" onclick="reparseMap()">🗺️ 重新解析地图</button>
     </div>
     <div class="diag-grid" id="diagGrid"></div>
     <div class="card" style="margin-top:16px;">
@@ -580,15 +579,6 @@ async function installTelemetry() {
   if (r && r.status === 'ok') toast('遥测插件已就绪');
   else if (r && (r.status === 'installed' || r.status === 'updated')) toast('已写入，重启游戏生效');
   else toast((r && r.detail) || '导入遥测失败', true);
-  setTimeout(loadState, 800);
-}
-
-async function reparseMap() {
-  if (!confirm('重新解析地图需要 1-3 分钟，期间面板会等待。继续吗？')) return;
-  toast('开始解析地图…');
-  var r = await callEntry('reparse_map', {}, 240000);
-  if (r && r.ok) toast(r.detail || '地图解析完成');
-  else toast((r && r.detail) || '地图解析失败', true);
   setTimeout(loadState, 800);
 }
 
