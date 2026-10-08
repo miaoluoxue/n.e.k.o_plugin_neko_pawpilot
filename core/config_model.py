@@ -38,6 +38,15 @@ DEFAULTS = {
     "safety_auto_stop": True,
     # 播报偏好（类别开关 + 频率模式）
     "broadcast_frequency": "standard",
+    # ── 内容层（2026-10 玩法扩充）──
+    "content_passing_places": True,   # 途经已知地点时介绍该地风土
+    "content_radio_dj": True,         # 猫娘电台 DJ 节目
+    "content_opening_story": True,    # 每单开场故事 + 起点地域文化
+    "content_arrival_culture": True,  # 到达地文化介绍
+    "radio_interval_s": 600.0,        # 电台节目间隔（秒）
+    "passing_radius_km": 6.0,         # 途经判定半径
+    "passing_cooldown_s": 1800.0,     # 同一地点播报冷却
+    "mountain_pass_delta_m": 120.0,   # 山口判定：180s 内海拔变化阈值（米）
     "broadcast_categories": {
         "safety": True,
         "task": True,
@@ -89,6 +98,14 @@ class PawpilotConfig:
         self.safety_failure_limit = int(data.get("safety_failure_limit", DEFAULTS["safety_failure_limit"]))
         self.safety_auto_stop = bool(data.get("safety_auto_stop", DEFAULTS["safety_auto_stop"]))
         self.broadcast_frequency = str(data.get("broadcast_frequency", DEFAULTS["broadcast_frequency"]))
+        self.content_passing_places = bool(data.get("content_passing_places", DEFAULTS["content_passing_places"]))
+        self.content_radio_dj = bool(data.get("content_radio_dj", DEFAULTS["content_radio_dj"]))
+        self.content_opening_story = bool(data.get("content_opening_story", DEFAULTS["content_opening_story"]))
+        self.content_arrival_culture = bool(data.get("content_arrival_culture", DEFAULTS["content_arrival_culture"]))
+        self.radio_interval_s = float(data.get("radio_interval_s", DEFAULTS["radio_interval_s"]))
+        self.passing_radius_km = float(data.get("passing_radius_km", DEFAULTS["passing_radius_km"]))
+        self.passing_cooldown_s = float(data.get("passing_cooldown_s", DEFAULTS["passing_cooldown_s"]))
+        self.mountain_pass_delta_m = float(data.get("mountain_pass_delta_m", DEFAULTS["mountain_pass_delta_m"]))
         self.broadcast_categories = dict(data.get("broadcast_categories", DEFAULTS["broadcast_categories"]))
         self.telemetry_plugin_rel = str(data.get("telemetry_plugin_rel", DEFAULTS["telemetry_plugin_rel"]))
         self.telemetry_bundle_rel = str(data.get("telemetry_bundle_rel", DEFAULTS["telemetry_bundle_rel"]))

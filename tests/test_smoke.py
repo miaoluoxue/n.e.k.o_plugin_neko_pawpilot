@@ -1031,6 +1031,136 @@ def test_crash_accel_and_window_detection():
     assert "crash" not in soft, "正常磨损增量不该误判碰撞"
 
 
+def test_place_book_learn_and_passing():
+    """地点簿：自学习地名坐标 → 途经判定（含冷却）。"""
+    from plugin.plugins.neko_pawpilot.core.memory import MemoryStore
+    from plugin.plugins.neko_pawpilot.core.places import PlaceBook
+
+    book = PlaceBook(MemoryStore(FakeStore()))
+    assert book.count() == 0
+    assert book.learn("Berlin", 10000.0, 20000.0, "city") is True
+    assert book.learn("", 1.0, 2.0) is False          # 空名不记
+    assert book.learn("Berlin", 10000.0, 20000.0, "city") is True   # 再访计数
+    assert book.count() == 1
+    assert book.query_visits("Berlin") == 2
+
+    near = book.nearest(10050.0, 20050.0, max_km=6.0)
+    assert near and near["name"] == "Berlin"
+    assert near["distance_km"] < 0.1
+    # 远处找不到
+    assert book.nearest(900000.0, 900000.0, max_km=6.0) is None
+
+    # 途经：首次命中 → 播报；立刻再来 → 冷却挡住；超过冷却 → 再播
+    hit = book.passing(10020.0, 20020.0, now=1000.0)
+    assert hit and hit["name"] == "Berlin"
+    assert book.passing(10020.0, 20020.0, now=1001.0) is None
+    assert book.passing(10020.0, 20020.0, now=1000.0 + 1801.0) is not None
+
+
+def test_radio_dj_segments():
+    """猫娘电台：按时段选节目、间隔生效、事实行含节目要求。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.config_model import PawpilotConfig
+    from plugin.plugins.neko_pawpilot.core.radio import RadioDJ
+
+    class Snap(TruckSnapshot):
+        pass
+
+    s = Snap()
+    s.sdk_active = True
+    s.on_job = True
+    s.world_x, s.world_z = 1000.0, 2000.0
+    s.time_abs_min = 2 * 60 + 30      # 深夜 02:30
+    s.route_distance_km = 120000.0
+    s.speed_mps = 22.0
+    s.map_scale = 19.0
+    dj = RadioDJ(PawpilotConfig())
+    brief = dj.pick(s, now=1000.0, driving_since=0.0)
+    assert brief and "猫娘电台" in brief
+    assert "深夜节目" in brief or "night" in brief
+    # 间隔未到 → 不再播
+    assert dj.pick(s, now=1005.0, driving_since=0.0) is None
+    # 未接单 → 不播
+    s.on_job = False
+    assert dj.pick(s, now=1000.0 + 700.0, driving_since=0.0) is None
+
+
+def test_content_fact_builders():
+    """开场故事 / 到达文化 / 途经介绍：事实行必须带上地名与要求。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.config_model import PawpilotConfig
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    async def _run():
+        rt = PawpilotRuntime(_FakePluginForRt(), PawpilotConfig())
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.on_job = True
+        s.city_src = "Lyon"
+        s.city_dst = "Milano"
+        s.cargo = "易碎品"
+        s.planned_distance_km = 620
+        s.time_abs_min = 7 * 60
+        opening = rt._opening_story_fact(s, ["上次这条线你超速了 3 次"])
+        arrival = rt._arrival_culture_fact(s)
+        passing = rt._passing_place_fact({"name": "Basel", "distance_km": 2.4, "visits": 3})
+        return opening, arrival, passing
+
+    opening, arrival, passing = asyncio.run(_run())
+    for text, must in ((opening, "Lyon"), (opening, "Milano"), (opening, "易碎品")):
+        assert must in text, f"开场事实行应含 {must}: {text}"
+    assert "地域特色" in opening, "开场应要求介绍起点文化"
+    assert "风土" in arrival and "Milano" in arrival, "到达应要求介绍当地风土"
+    assert "Basel" in passing and "特点" in passing, "途经应要求讲该地特点"
+
+
+def test_ferry_train_and_mountain_pass_events():
+    """渡轮/火车（带真实站名）与山口（海拔变化）事件。"""
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.config_model import PawpilotConfig
+    from plugin.plugins.neko_pawpilot.core.event_catalog import EVENT_CATALOG
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    assert "ferry" in EVENT_CATALOG and "train" in EVENT_CATALOG
+    assert "mountain_pass" in EVENT_CATALOG
+
+    def mk(**kw):
+        s = TruckSnapshot()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    eng = EventEngine(PawpilotConfig())
+    got = []
+    eng.on_event(lambda ev: got.append((ev.name, ev.data)))
+    eng.feed(mk(sdk_active=True, on_job=True))
+    eng.feed(mk(sdk_active=True, on_job=True, ev_ferry=True,
+                ferry_source="Calais", ferry_target="Dover"))
+    names = [n for n, _ in got]
+    assert "ferry" in names, "上渡轮应触发事件"
+    data = dict(got)["ferry"]
+    assert data["source"] == "Calais" and data["target"] == "Dover"
+
+    # 火车
+    eng.feed(mk(sdk_active=True, on_job=True, ev_ferry=True,
+                ferry_source="Calais", ferry_target="Dover", ev_train=True,
+                train_source="Hamburg", train_target="Stockholm"))
+    assert "train" in [n for n, _ in got]
+
+    # 山口：180 秒窗口内海拔爬升 > 阈值
+    eng2 = EventEngine(PawpilotConfig())
+    passes = []
+    eng2.on_event(lambda ev: passes.append(ev.data) if ev.name == "mountain_pass" else None)
+    eng2.feed(mk(sdk_active=True, on_job=True, world_y=50.0))
+    for i in range(1, 5):
+        eng2.feed(mk(sdk_active=True, on_job=True, world_y=50.0 + 40.0 * i))
+    assert passes, "海拔变化超阈值应触发山口事件"
+    assert passes[-1]["climb_m"] >= 120.0
+    assert passes[-1]["direction"] in ("up", "down")
+
+
 if __name__ == "__main__":
     test_manifest()
     print("manifest OK")

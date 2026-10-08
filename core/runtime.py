@@ -22,8 +22,10 @@ from .memory import MemoryStore
 from .mood import Persona
 from .photo_album import PhotoAlbum
 from .pilot import CatPilot
+from .places import PlaceBook
 from .proactive import Proactive
 from .profile import DriverProfile
+from .radio import RadioDJ
 from .recall import Recall
 from .route_planner import RoutePlanner
 from .safety_guard import SafetyGuard
@@ -83,6 +85,9 @@ class PawpilotRuntime:
         self.knowledge = KnowledgeBase()
         self.map_kb = MapKnowledge()
         self.proactive = Proactive(config, map_kb=self.map_kb)
+        # 内容层（2026-10 玩法扩充）：地点簿（自学习地名坐标）+ 猫娘电台
+        self.places = PlaceBook(self.memory)
+        self.radio = RadioDJ(config)
         self.small_talk = SmallTalk(persona=self.persona)
         self.pilot = CatPilot(persona=self.persona)
         self.profile = DriverProfile(self.memory)
@@ -563,6 +568,28 @@ class PawpilotRuntime:
                     if scene_topic:
                         await self.push.push_direct(self.persona.polish(scene_topic))
                         continue
+                # 途经已知地点 → 顺手介绍这个地方（地点簿自学习，越开越准）
+                if getattr(self.cfg, "content_passing_places", True) and not snap.paused:
+                    place = self.places.passing(
+                        snap.world_x, snap.world_z, now,
+                        radius_km=float(getattr(self.cfg, "passing_radius_km", 6.0) or 6.0),
+                        cooldown_s=float(getattr(self.cfg, "passing_cooldown_s", 1800.0) or 1800.0),
+                    )
+                    if place:
+                        await self.push.push_fact(self._passing_place_fact(place))
+                        continue
+                # 猫娘电台（按时段/天气/驾驶时长挑节目；内容交宿主 LLM 演绎）
+                if getattr(self.cfg, "content_radio_dj", True):
+                    driving_since = 0.0
+                    if self.proactive._drive_start_ts:
+                        driving_since = now - self.proactive._drive_start_ts
+                    weather = getattr(self, "_last_weather_hint", "")
+                    brief = self.radio.pick(snap, now, driving_since=driving_since,
+                                            station_hint=getattr(self, "_radio_station_hint", ""),
+                                            weather=weather)
+                    if brief:
+                        await self.push.push_fact(brief)
+                        continue
                 # 地图路况叙事（道路匹配 + 市区/野外 + 弯道 + 服务设施）：5 分钟一次
                 # 走 respond（事实行交宿主 LLM 说话）——旧版是 blind 直出气泡，
                 # 猫娘"从没说过"，用户体感就等于地图数据没用上。
@@ -610,6 +637,13 @@ class PawpilotRuntime:
         text = await asyncio.to_thread(self.hud_ocr.read_text)
         if not text:
             return None
+        # 天气线索（OCR 里出现雨/雪/雾就记一笔）——供猫娘电台与路况叙事引用
+        low = text.lower()
+        for kw, label in (("rain", "雨"), ("雨", "雨"), ("snow", "雪"),
+                          ("雪", "雪"), ("fog", "雾"), ("雾", "雾")):
+            if kw in low:
+                self._last_weather_hint = label
+                break
         # 等级检测：OCR 识别到数字等级 → 庆祝
         level = self._extract_level(text)
         if level:
@@ -644,6 +678,59 @@ class PawpilotRuntime:
         if snap.paused or snap.speed_kmh < 5:
             return "service"
         return "default"
+
+    # ── 内容层：地点文化 / 开场故事 / 途经播报（事实行交宿主 LLM 演绎）──
+
+    def _opening_story_fact(self, snap, hints: Optional[list] = None) -> str:
+        """每单开场：把这一单的客观信息 + 起点地域特色要求交给宿主 LLM。"""
+        km = snap.planned_distance_km
+        eta = km / 65.0 if km else 0.0
+        hour = (snap.time_abs_min // 60) % 24 if snap.time_abs_min else -1
+        when = ""
+        if 0 <= hour < 5 or hour >= 23:
+            when = "深夜出发"
+        elif 5 <= hour < 9:
+            when = "清晨出发"
+        elif 17 <= hour < 22:
+            when = "傍晚出发"
+        bits = [f"起点 {snap.city_src or '未知'}", f"终点 {snap.city_dst or '未知'}",
+                f"货物 {snap.cargo or '普通货'}", f"全程约 {km} km"]
+        if eta:
+            bits.append(f"预计 {eta:.1f} 小时")
+        if when:
+            bits.append(when)
+        if snap.is_city:
+            bits.append("当前在市区发车")
+        mem = ""
+        if hints:
+            mem = "、".join(str(h) for h in hints[:2])
+        fact = ("[行程开场] " + "；".join(bits) + "。"
+                "请以猫娘语气开个场：一句介绍起点的地域特色/文化（可以讲当地风物、"
+                "路况习惯），一句说这趟的打算。不要念参数，像副驾随口聊。")
+        if mem:
+            fact += f"（可顺带提起：{mem}）"
+        return fact
+
+    def _arrival_culture_fact(self, snap) -> str:
+        """到达目的地：让猫娘讲讲这个地方的特色与文化。"""
+        city = snap.city_dst or ""
+        bits = [f"目的地 {city or '（未知城市）'}"]
+        if snap.job_delivered_revenue:
+            bits.append(f"本单收入 {snap.job_delivered_revenue} €")
+        if snap.job_cargo_damage is not None:
+            bits.append(f"货物完好率 {(1 - snap.cargo_damage) * 100:.0f}%")
+        return ("[到达] " + "；".join(bits) + "。"
+                "请以猫娘语气收个尾：介绍一下这个地方的风土/文化/值得一看的东西"
+                "（如果知道当地特色就点一句），并祝贺主人跑完这单。")
+
+    def _passing_place_fact(self, place: dict) -> str:
+        """途经已知地点：让她随口讲一句这个地方的特点。"""
+        name = place.get("name", "")
+        dist = place.get("distance_km", 0.0)
+        visits = int(place.get("visits", 0) or 0)
+        tail = "、我们以前来过这里" if visits > 1 else ""
+        return (f"[途经] 正经过 {name} 附近（约 {dist:.1f} km）{tail}。"
+                f"请以猫娘语气随口说一句这个地方的特点或风物（一句话，别念参数）")
 
     def _world_position_line(self, snap) -> Optional[str]:
         """地图路况叙事：真实道路匹配 + 市区/野外 + 前方弯道 + 最近设施。
@@ -710,6 +797,13 @@ class PawpilotRuntime:
             hints = self.recall.on_job_start(ev.snapshot.city_src, ev.snapshot.city_dst,
                                              ev.snapshot.cargo)
             self._spawn(self.memory.save())
+            # 地点簿学习：接单时的坐标就是起点城市的位置
+            snap0 = ev.snapshot
+            if snap0.city_src:
+                self.places.learn(snap0.city_src, snap0.world_x, snap0.world_z, "city")
+            if snap0.city_dst:
+                # 终点坐标未知，等到达时再学（这里只登记名字，坐标留待 job_delivered）
+                pass
             lines = []
             challenge_line = self.challenge.start()
             if challenge_line:
@@ -717,12 +811,11 @@ class PawpilotRuntime:
             preview = self.route_planner.preview(ev.snapshot)
             if preview:
                 lines.append(self.persona.polish(preview))
-            if hints:
-                # 记忆唤起走 respond（LLM 演绎），其余盲出
-                self._spawn(self.push.push_fact(
-                    self.emotion.custom_fact(" ".join(hints), "job_start")))
             if lines:
                 self._spawn(self.push.push_direct("\n".join(lines)))
+            # ── 每单开场故事 + 起点地域文化（事实行交宿主 LLM 演绎，不硬编码台词）
+            if getattr(self.cfg, "content_opening_story", True):
+                self._spawn(self.push.push_fact(self._opening_story_fact(ev.snapshot, hints)))
             return
         if ev.name == "crash":
             # 计数已由 _track_stats 记一次（此处再 +1 会把单次事故计成两次）
@@ -748,6 +841,14 @@ class PawpilotRuntime:
             if line:
                 self._spawn(self.push.push_direct(
                     self.persona.polish(line)))
+            # 地点簿学习：到达时的坐标就是目的城市的位置
+            snap_d = ev.snapshot
+            if snap_d.city_dst:
+                self.places.learn(snap_d.city_dst, snap_d.world_x, snap_d.world_z, "city")
+                self._spawn(self.memory.save())
+            # ── 到达地文化介绍（交宿主 LLM 讲这个地方的风土，不硬编码）
+            if getattr(self.cfg, "content_arrival_culture", True):
+                self._spawn(self.push.push_fact(self._arrival_culture_fact(snap_d)))
             # 到货升级提议（赚了钱 → 车行升级，L3 低频）
             revenue = ev.data.get("revenue", ev.snapshot.job_delivered_revenue)
             if revenue and revenue > 8000 and getattr(self, "_last_upgrade_tip", 0) == 0:
@@ -766,6 +867,31 @@ class PawpilotRuntime:
             if line:
                 self._spawn(self.push.push_direct(
                     self.persona.polish(line)))
+            return
+        if ev.name in ("ferry", "train"):
+            # 过境：站点名是遥测里唯一可靠的地名 → 学习 + 介绍两端风土
+            src = str(ev.data.get("source", "") or "")
+            dst = str(ev.data.get("target", "") or "")
+            snap_p = ev.snapshot
+            if snap_p is not None:
+                if src:
+                    self.places.learn(src, snap_p.world_x, snap_p.world_z, "ferry_station")
+                if dst:
+                    self.places.learn(dst, snap_p.world_x, snap_p.world_z, "ferry_station")
+                self._spawn(self.memory.save())
+            what = "渡轮" if ev.name == "ferry" else "火车"
+            self._spawn(self.push.push_fact(
+                f"[过境] 主人把车开上了{what}：{src or '起点'} → {dst or '终点'}。"
+                f"请以猫娘语气说一句（提一下这两地的地理位置/海峡或沿途风景，1-2 句）"))
+            return
+        if ev.name == "mountain_pass":
+            climb = ev.data.get("climb_m", 0)
+            alt = ev.data.get("altitude", 0)
+            up = ev.data.get("direction") == "up"
+            self._spawn(self.push.push_fact(
+                f"[地标] 正在{'爬坡上山' if up else '下坡'}：这段海拔变化 {climb:.0f} 米"
+                f"（当前海拔 {alt:.0f} 米）。请以猫娘语气提醒一句山路驾驶"
+                f"（连续弯道/长下坡用发动机制动等），1 句即可"))
             return
         allowed, reason = self.arbiter.decide(ev.name, ev.snapshot)
         if not allowed:

@@ -48,6 +48,9 @@ EV_TIME_TIGHT = "time_tight"        # 时间紧张
 EV_EARLY_ARRIVAL = "early_arrival"  # 到货提前
 EV_CARGO_DAMAGE = "cargo_damage"    # 货物完好率跌破阈值
 EV_VEHICLE_DAMAGE = "vehicle_damage"  # 车损累计跨档（非碰撞突增）
+EV_FERRY = "ferry"                  # 上渡轮（带真实站点名 → 地名来源）
+EV_TRAIN = "train"                  # 上火车（同上）
+EV_MOUNTAIN_PASS = "mountain_pass"  # 翻越山口/长坡（按海拔变化判定）
 
 # 货损播报档位（损伤 0-1）：完好率跌破 95% 起报，恶化到 80%/50% 再报
 CARGO_DAMAGE_BANDS = (0.05, 0.20, 0.50)
@@ -74,6 +77,9 @@ class EventEngine:
         self.crash_delta = config.crash_damage_delta
         self.crash_accel_g = float(getattr(config, "crash_accel_g", 0.0) or 0.0)
         self.crash_window_s = float(getattr(config, "crash_damage_window_s", 5.0) or 5.0)
+        # 山口判定：180 秒窗口内海拔变化超过该值即报（平原可忽略、山区明显）
+        self.pass_delta_m = float(getattr(config, "mountain_pass_delta_m", 120.0) or 120.0)
+        self._alt_hist: List[tuple] = []
         self.brake_force = config.hard_brake_force
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
@@ -108,6 +114,7 @@ class EventEngine:
         self.crash_delta = config.crash_damage_delta
         self.crash_accel_g = float(getattr(config, "crash_accel_g", 0.0) or 0.0)
         self.crash_window_s = float(getattr(config, "crash_damage_window_s", 5.0) or 5.0)
+        self.pass_delta_m = float(getattr(config, "mountain_pass_delta_m", 120.0) or 120.0)
         self.brake_force = config.hard_brake_force
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
@@ -386,6 +393,43 @@ class EventEngine:
             ev = self._emit(EV_TOLLGATE, s, force=True)
             if ev:
                 out.append(ev)
+
+        # 渡轮 / 火车：过境事件（顺带给出真实站点名，供地点簿学习与介绍）
+        if s.ev_ferry and (prev is None or not prev.ev_ferry):
+            ev = self._emit(EV_FERRY, s, {
+                "source": s.ferry_source, "target": s.ferry_target,
+            }, force=True)
+            if ev:
+                out.append(ev)
+        if s.ev_train and (prev is None or not prev.ev_train):
+            ev = self._emit(EV_TRAIN, s, {
+                "source": s.train_source, "target": s.train_target,
+            }, force=True)
+            if ev:
+                out.append(ev)
+
+        # 山口 / 长坡：按海拔（world_y）变化判定——地图数据里没有桥隧标注，
+        # 但海拔是遥测直接给的，翻山是最容易识别、也最值得一提的地标类型。
+        if s.paused or not s.on_job:
+            self._alt_hist = []
+        else:
+            self._alt_hist.append((now, s.world_y))
+            cutoff_alt = now - 180.0
+            while self._alt_hist and self._alt_hist[0][0] < cutoff_alt:
+                self._alt_hist.pop(0)
+            if len(self._alt_hist) >= 2:
+                lo = min(a for _, a in self._alt_hist)
+                hi = max(a for _, a in self._alt_hist)
+                if (hi - lo) >= self.pass_delta_m:
+                    rising = s.world_y >= (lo + hi) / 2.0
+                    ev = self._emit(EV_MOUNTAIN_PASS, s, {
+                        "climb_m": round(hi - lo, 1),
+                        "altitude": round(s.world_y, 1),
+                        "direction": "up" if rising else "down",
+                    })
+                    if ev:
+                        out.append(ev)
+                        self._alt_hist = [(now, s.world_y)]
 
         self._last = s
         return out

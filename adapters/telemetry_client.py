@@ -426,6 +426,12 @@ class TruckSnapshot:
     ev_tollgate: bool = False
     ev_refuel: bool = False
     ev_refuel_payed: bool = False
+    ev_ferry: bool = False
+    ev_train: bool = False
+    ferry_source: str = ""
+    ferry_target: str = ""
+    train_source: str = ""
+    train_target: str = ""
     trailer_attached: bool = False
     trailer_cargo_damage: float = 0.0
     trailer_license: str = ""
@@ -728,6 +734,14 @@ class TelemetryReader:
         s.ev_tollgate = bool(sp.tollgate)
         s.ev_refuel = bool(sp.refuel)
         s.ev_refuel_payed = bool(sp.refuelPayed)
+        # 渡轮/火车：过境事件 + 真实站点名（唯一能拿到的"地名"来源之一）
+        s.ev_ferry = bool(sp.ferry)
+        s.ev_train = bool(sp.train)
+        gs = m.gameplay_s
+        s.ferry_source = _cstr(gs.ferrySourceName)
+        s.ferry_target = _cstr(gs.ferryTargetName)
+        s.train_source = _cstr(gs.trainSourceName)
+        s.train_target = _cstr(gs.trainTargetName)
         tr = m.trailer.trailer[0]
         s.trailer_attached = bool(tr.com_b.attached)
         s.trailer_cargo_damage = tr.com_f.cargoDamage
