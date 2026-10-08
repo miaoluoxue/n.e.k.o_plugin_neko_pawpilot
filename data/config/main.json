@@ -28,6 +28,11 @@
   "passing_radius_km": 6.0,
   "passing_cooldown_s": 1800.0,
   "mountain_pass_delta_m": 120.0,
+  "pilot_relay_enabled": true,
+  "pilot_lookahead_m": 45.0,
+  "pilot_steer_gain": 1.6,
+  "pilot_steer_step": 6.0,
+  "pilot_max_lateral_m": 8.0,
   "broadcast_categories": {
     "safety": true,
     "task": true,

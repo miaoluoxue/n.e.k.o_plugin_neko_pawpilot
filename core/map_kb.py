@@ -122,6 +122,24 @@ class MapKnowledge:
                         "x": px, "z": pz}
         return best
 
+    def road_points_near(self, x: float, z: float,
+                         radius_km: float = 0.08) -> List[tuple]:
+        """半径内的道路段端点坐标 [(x, z), ...]——前视点跟踪（pure pursuit）用。
+
+        道路段是无序点云（没有路口拓扑），所以转向控制不做"沿段追踪"，
+        而是取附近路点、在车头坐标系里挑一个合适的前视目标点。
+        """
+        if not self._roads:
+            return []
+        r2 = (radius_km * 1000.0) ** 2
+        out: List[tuple] = []
+        for rd in self._near_roads(x, z, radius_km):
+            for px, pz in ((rd.get("x", 0.0), rd.get("z", 0.0)),
+                           (rd.get("x2", 0.0), rd.get("z2", 0.0))):
+                if (px - x) ** 2 + (pz - z) ** 2 <= r2:
+                    out.append((px, pz))
+        return out
+
     def road_density(self, x: float, z: float, radius_km: float = 1.0) -> int:
         """半径内道路段数量——路网密度（城区远高于野外，可做市区判据）。"""
         if not self._roads:

@@ -12,7 +12,6 @@ from plugin.plugins.neko_pawpilot.adapters.telemetry_client import (
     TruckSnapshot,
 )
 from plugin.plugins.neko_pawpilot.core.arbiter import Arbiter
-from plugin.plugins.neko_pawpilot.core.challenge import Challenge
 from plugin.plugins.neko_pawpilot.core.config_model import PawpilotConfig
 from plugin.plugins.neko_pawpilot.core.event_catalog import (
     EVENT_CATALOG,
@@ -247,15 +246,76 @@ def test_ledger():
     assert "净赚" in ledger.render_summary()
 
 
-def test_challenge():
-    store = MemoryStore(FakeStore())
-    ch = Challenge(store)
-    line = ch.start(kind="fuel")
-    assert line  # 挑战话术非空
-    settle = ch.settle({"fuel_avg": 20.0, "speedings": 0, "hard_brakes": 0})
-    assert "赢" in settle or "♪" in settle  # 低油耗必赢
-    wins = store.query("relationship", "challenge_wins") or {}
-    assert wins.get("count", 0) >= 1
+def test_pilot_road_following():
+    """接力驾驶 v2：车头方向自标定 + 前视点跟踪转向 + 安全兜底。
+
+    2026-10 用户定调：陪玩要"她真会开"，而不是话术游戏（赌注机制已移除）。
+    """
+    from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
+    from plugin.plugins.neko_pawpilot.core.map_kb import MapKnowledge
+    from plugin.plugins.neko_pawpilot.core.pilot import CatPilot
+
+    kb = MapKnowledge()
+    road = kb._roads[0]
+    ax, az = float(road["x"]), float(road["z"])
+    bx, bz = float(road["x2"]), float(road["z2"])
+    # 道路方向与法向
+    ddx, ddz = bx - ax, bz - az
+    dn = (ddx * ddx + ddz * ddz) ** 0.5 or 1.0
+    ux, uz = ddx / dn, ddz / dn          # 沿路
+    nx_, nz_ = -uz, ux                   # 垂直（横向）
+
+    p = CatPilot(map_kb=kb, cfg=PawpilotConfig())
+    p.state = "engaged"
+
+    def snap(x, z, speed=60.0, limit=80.0, fuel=60.0, city=False):
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.on_job = True
+        s.world_x, s.world_z = x, z
+        s.speed_mps = speed / 3.6
+        s.speed_limit_mps = limit / 3.6
+        s.fuel = fuel
+        s.fuel_capacity = 100.0
+        s.map_scale = 3.0 if city else 19.0
+        return s
+
+    # 沿道路方向行驶两拍 → 车头方向被标定（不依赖 rotationY 的轴向约定）
+    p._update_heading(snap(ax, az))
+    p._update_heading(snap(ax + ux * 20.0, az + uz * 20.0))
+    assert p._fwd is not None, "行驶两拍后应标定出车头方向"
+    dot = p._fwd[0] * ux + p._fwd[1] * uz
+    assert dot > 0.9, f"车头方向应≈道路方向，实际 {p._fwd}·{ux, uz}={dot:.2f}"
+
+    # 在路中心线上：修正量应很小
+    cmd_center = abs(p._steer_command(snap(ax, az)))
+    # 横向偏移 6 米（垂直于道路）：应产生明显修正
+    off_x, off_z = ax + nx_ * 6.0, az + nz_ * 6.0
+    assert kb.road_points_near(ax, az, radius_km=0.08), "应能取到真实路点"
+    cmd_off = abs(p._steer_command(snap(off_x, off_z)))
+    assert cmd_off > 0.05, f"偏离中心线应产生转向修正，实际 {cmd_off}"
+    assert cmd_off > cmd_center, f"偏离时修正量应大于居中时（{cmd_off} vs {cmd_center}）"
+
+    # 安全兜底：横向发散 / 无路点 / 市区 / 超速 / 低油 → 交还
+    p._lateral_err_m = 20.0
+    assert p._danger_check(snap(ax, az)) == "off_lane"
+    p._lateral_err_m = 0.0
+    p._no_road_ticks = 15
+    assert p._danger_check(snap(ax, az)) == "no_road"
+    p._no_road_ticks = 0
+    assert p._danger_check(snap(ax, az, city=True)) == "city"
+    assert p._danger_check(snap(ax, az, speed=120.0, limit=80.0)) == "overspeed"
+    assert p._danger_check(snap(ax, az, fuel=3.0)) == "low_fuel"
+    assert p._danger_check(snap(ax, az)) is None
+
+
+def test_challenge_removed():
+    """赌注机制已移除（用户定调：那是话术游戏，不是陪玩玩法）。"""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert not (root / "core" / "challenge.py").exists(), "challenge 模块应已删除"
+    src = (root / "core" / "runtime.py").read_text(encoding="utf-8")
+    assert "challenge" not in src.lower(), "runtime 不应再引用赌注机制"
 
 
 def test_trip_summary():
@@ -1182,8 +1242,8 @@ if __name__ == "__main__":
     print("arbiter OK")
     test_ledger()
     print("ledger OK")
-    test_challenge()
-    print("challenge OK")
+    test_pilot_road_following()
+    print("pilot OK")
     test_trip_summary()
     print("summary OK")
     test_knowledge()

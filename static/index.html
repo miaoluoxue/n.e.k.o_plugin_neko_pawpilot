@@ -496,6 +496,9 @@ function renderDiagnostics() {
   items.push({ n:'档位 / 灯光', s: String(gearTxt), cls: 'good', d: ltOn || '灯光全灭' });
   items.push({ n:'机务', s: (mech.brake_temp !== undefined ? mech.brake_temp + '°C' : '-'), cls: (mech.brake_temp || 0) > 300 ? 'warn' : 'good', d: '气压 ' + (mech.air_pressure || 0) + ' · 油温 ' + (mech.oil_temp || 0) + ' · 水温 ' + (mech.water_temp || 0) + ' · 电压 ' + (mech.battery_v || 0) + 'V · 着地轮 ' + (mech.wheels_on_ground || 0) });
   items.push({ n:'地图区域', s: s.in_city ? '市区' : '郊外/高速', cls: 'good', d: '比例尺 ' + (s.map_scale || 0) + (s.map_scale === 3 ? '（1:3 城市）' : (s.map_scale >= 10 ? '（1:19 野外）' : '')) });
+  var pl = s.pilot || {};
+  var stateLabel = { idle: '未接管', offer: '等回复', engaged: '她正在开', handing_over: '交还中' }[pl.state] || '-';
+  items.push({ n:'接力驾驶', s: stateLabel, cls: pl.state === 'engaged' ? 'good' : '', d: '前视点跟踪：横向 ' + (pl.lateral_m === undefined ? '-' : pl.lateral_m + ' m') + ' · 转向 ' + (pl.steer_cmd === undefined ? '-' : pl.steer_cmd) + ' · 方向符号 ' + (pl.steer_sign || 1) + (pl.heading_known ? '' : ' · 未标定朝向') });
   document.getElementById('diagGrid').innerHTML = items.map(i =>
     '<div class="diag-item"><div class="n">' + i.n + '</div><div class="s ' + i.cls + '">' + i.s + '</div><div class="desc">' + i.d + '</div></div>').join('');
   var log = s.decision_log || [];

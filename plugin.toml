@@ -75,6 +75,12 @@ radio_interval_s = 600.0         # 电台节目间隔（秒）
 passing_radius_km = 6.0          # 途经判定半径
 passing_cooldown_s = 1800.0      # 同一地点播报冷却
 mountain_pass_delta_m = 120.0    # 山口判定：180s 内海拔变化阈值（米）
+# ── 接力驾驶（她真的开一段；v2 前视点跟踪）──
+pilot_relay_enabled = true       # 开阔路段主动提议接管
+pilot_lookahead_m = 45.0         # 前视点距离
+pilot_steer_gain = 1.6           # 横向偏角 → 转向指令增益
+pilot_steer_step = 6.0           # 每拍鼠标相对位移上限（像素）
+pilot_max_lateral_m = 8.0        # 横向偏差超过即交还（安全带）
 broadcast_categories = { safety = true, task = true, trip = true, lifecycle = true, chatter = false }
 telemetry_plugin_rel = "bin/win_x64/plugins/scs-telemetry.dll"
 telemetry_bundle_rel = "data/telemetry/scs-telemetry.dll"

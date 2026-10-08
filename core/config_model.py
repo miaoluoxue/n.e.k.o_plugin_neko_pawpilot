@@ -43,10 +43,16 @@ DEFAULTS = {
     "content_radio_dj": True,         # 猫娘电台 DJ 节目
     "content_opening_story": True,    # 每单开场故事 + 起点地域文化
     "content_arrival_culture": True,  # 到达地文化介绍
-    "radio_interval_s": 600.0,        # 电台节目间隔（秒）
+    "radio_interval_s": 1800.0,       # 电台节目间隔（秒）——去话痨化：30 分钟
     "passing_radius_km": 6.0,         # 途经判定半径
-    "passing_cooldown_s": 1800.0,     # 同一地点播报冷却
+    "passing_cooldown_s": 3600.0,     # 同一地点播报冷却（1 小时）
     "mountain_pass_delta_m": 120.0,   # 山口判定：180s 内海拔变化阈值（米）
+    # ── 接力驾驶（她真的开一段；v2 前视点跟踪）──
+    "pilot_relay_enabled": True,      # 开阔路段主动提议接管
+    "pilot_lookahead_m": 45.0,        # 前视点距离
+    "pilot_steer_gain": 1.6,          # 横向偏角 → 转向指令增益
+    "pilot_steer_step": 6.0,          # 每拍鼠标相对位移上限（像素）
+    "pilot_max_lateral_m": 8.0,       # 横向偏差超过即交还（安全带）
     "broadcast_categories": {
         "safety": True,
         "task": True,
@@ -106,6 +112,11 @@ class PawpilotConfig:
         self.passing_radius_km = float(data.get("passing_radius_km", DEFAULTS["passing_radius_km"]))
         self.passing_cooldown_s = float(data.get("passing_cooldown_s", DEFAULTS["passing_cooldown_s"]))
         self.mountain_pass_delta_m = float(data.get("mountain_pass_delta_m", DEFAULTS["mountain_pass_delta_m"]))
+        self.pilot_relay_enabled = bool(data.get("pilot_relay_enabled", DEFAULTS["pilot_relay_enabled"]))
+        self.pilot_lookahead_m = float(data.get("pilot_lookahead_m", DEFAULTS["pilot_lookahead_m"]))
+        self.pilot_steer_gain = float(data.get("pilot_steer_gain", DEFAULTS["pilot_steer_gain"]))
+        self.pilot_steer_step = float(data.get("pilot_steer_step", DEFAULTS["pilot_steer_step"]))
+        self.pilot_max_lateral_m = float(data.get("pilot_max_lateral_m", DEFAULTS["pilot_max_lateral_m"]))
         self.broadcast_categories = dict(data.get("broadcast_categories", DEFAULTS["broadcast_categories"]))
         self.telemetry_plugin_rel = str(data.get("telemetry_plugin_rel", DEFAULTS["telemetry_plugin_rel"]))
         self.telemetry_bundle_rel = str(data.get("telemetry_bundle_rel", DEFAULTS["telemetry_bundle_rel"]))

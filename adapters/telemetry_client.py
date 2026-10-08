@@ -399,6 +399,7 @@ class TruckSnapshot:
     wheels_on_ground: int = 0
     warnings: Dict[str, bool] = field(default_factory=dict)
     map_scale: float = 0.0             # 3=城市(1:3) / 19=野外(1:19)
+    heading_y: float = 0.0             # 车头朝向（rotationY，弧度；轴向待实测标定）
     is_cargo_loaded: bool = False
     park_brake: bool = False
     engine_enabled: bool = False
@@ -698,6 +699,7 @@ class TelemetryReader:
             "battery": bool(tb_.batteryVoltageWarning),
         }
         s.map_scale = float(m.common_f.scale)
+        s.heading_y = float(m.truck_dp.rotationY)
         cb = m.config_b
         s.is_cargo_loaded = bool(cb.isCargoLoaded)
         tb = m.truck_b

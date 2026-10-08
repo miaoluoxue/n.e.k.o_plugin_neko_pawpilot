@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, Optional
 
 from ..adapters.llm_client import LLMProvider
@@ -11,7 +12,6 @@ from ..adapters.telemetry_client import TelemetryReader
 from ..adapters.telemetry_installer import TelemetryInstaller
 from ..catgirl.bridge import CatgirlBridge
 from .arbiter import Arbiter
-from .challenge import Challenge
 from .config_model import PawpilotConfig
 from .event_engine import EventEngine, TruckEvent
 from .knowledge import KnowledgeBase
@@ -80,7 +80,6 @@ class PawpilotRuntime:
         self.memory = MemoryStore(plugin.store)
         self.recall = Recall(self.memory)
         self.ledger = Ledger(self.memory)
-        self.challenge = Challenge(self.memory)
         self.trip_summary = TripSummary({})
         self.knowledge = KnowledgeBase()
         self.map_kb = MapKnowledge()
@@ -89,7 +88,7 @@ class PawpilotRuntime:
         self.places = PlaceBook(self.memory)
         self.radio = RadioDJ(config)
         self.small_talk = SmallTalk(persona=self.persona)
-        self.pilot = CatPilot(persona=self.persona)
+        self.pilot = CatPilot(persona=self.persona, map_kb=self.map_kb, cfg=config)
         self.profile = DriverProfile(self.memory)
         self.scene_chat = SceneChat()
         self.route_planner = RoutePlanner(self.knowledge)
@@ -376,8 +375,7 @@ class PawpilotRuntime:
             "dry_run": self.cfg.dry_run,
             "telemetry_install": self.telemetry_install_state,
             "game_dir": self._game_dir or "",
-            "pilot": self.pilot.snapshot(),
-            "mood": persona.get("mood", ""),
+            "pilot": self.pilot.snapshot(),            "mood": persona.get("mood", ""),
             "catgirl": {
                 "name": self.persona.name,
                 "user_call": self.persona.user_call,
@@ -397,10 +395,6 @@ class PawpilotRuntime:
             "safety": arb.get("safety", {}),
             "decision_log": self.arbiter.decision_snapshot(),
             "ledger": self.ledger.month_summary(),
-            "challenge_stats": {
-                "wins": (self.memory.query("relationship", "challenge_wins") or {}).get("count", 0),
-                "losses": (self.memory.query("relationship", "challenge_losses") or {}).get("count", 0),
-            },
             "profile": self.profile.snapshot(),
             "level": self.level_celebrate.snapshot().get("level", 0),
             "route_options": self.route_planner.snapshot().get("options", []),
@@ -522,8 +516,10 @@ class PawpilotRuntime:
                         if not self.cfg.dry_run:
                             pilot_msg = self.pilot.tick(s)
                             if pilot_msg:
-                                self._spawn(
-                                    self.push.push_direct(self.persona.polish(pilot_msg)))
+                                # 交还/危险退出：走 respond（她要解释"为什么还你"）
+                                self._spawn(self.push.push_fact(
+                                    self.emotion.custom_fact(pilot_msg, "proactive")))
+                                self._last_pilot_handback = time.time()
                         else:
                             self.pilot.tick_dry(s)
                         # 有驾驶行为（任务中或车速>0）才保留快照，供提议/闲聊/面板
@@ -542,7 +538,13 @@ class PawpilotRuntime:
                 await asyncio.sleep(2.0)
 
     async def _propose_loop(self) -> None:
-        """L3 主动提议 + L4 闲聊 + 里程碑（低频）。"""
+        """L3 主动提议 + L4 闲聊 + 里程碑（低频）。
+
+        去话痨化原则（2026-10 用户定调）：**每条主动输出都应伴随一个动作或状态
+        变化**，否则不发。所以这里只保留：接力驾驶提议（她要接管方向盘）、
+        油量/休息等可执行提醒、途经/到达等真实事件内容；纯陪聊频率大幅下调
+        （电台 30 分钟一次、定位叙事 15 分钟一次）。
+        """
         import time as _time
         while True:
             try:
@@ -568,6 +570,21 @@ class PawpilotRuntime:
                     if scene_topic:
                         await self.push.push_direct(self.persona.polish(scene_topic))
                         continue
+                # ── 接力驾驶提议：开阔路段主动提出"我来开一段"（有动作，不是话）
+                if (getattr(self.cfg, "pilot_relay_enabled", True)
+                        and self.pilot.state == "idle" and self.pilot.available
+                        and snap.on_job and not snap.paused
+                        and snap.is_open_road and snap.speed_kmh > 40
+                        and now - getattr(self, "_last_pilot_offer", 0) > 900
+                        and now - getattr(self, "_last_pilot_handback", 0) > 600):
+                    self._last_pilot_offer = now
+                    self.pilot.offer()
+                    await self.push.push_fact(
+                        "[接力驾驶] 现在是开阔路段（郊外/高速、车速 "
+                        f"{snap.speed_kmh:.0f} km/h），猫娘想替你开一段让你歇会儿。"
+                        "请以猫娘语气问一句要不要她来开（提示可用面板「猫娘智驾·同意」"
+                        "或直接说一声）。不要提系统/工具")
+                    continue
                 # 途经已知地点 → 顺手介绍这个地方（地点簿自学习，越开越准）
                 if getattr(self.cfg, "content_passing_places", True) and not snap.paused:
                     place = self.places.passing(
@@ -593,7 +610,7 @@ class PawpilotRuntime:
                 # 地图路况叙事（道路匹配 + 市区/野外 + 弯道 + 服务设施）：5 分钟一次
                 # 走 respond（事实行交宿主 LLM 说话）——旧版是 blind 直出气泡，
                 # 猫娘"从没说过"，用户体感就等于地图数据没用上。
-                if self.map_kb.snapshot().get("loaded") and now - getattr(self, "_last_pos", 0) > 300:
+                if self.map_kb.snapshot().get("loaded") and now - getattr(self, "_last_pos", 0) > 900:
                     self._last_pos = now
                     pos_line = self._world_position_line(snap)
                     if pos_line:
@@ -805,9 +822,6 @@ class PawpilotRuntime:
                 # 终点坐标未知，等到达时再学（这里只登记名字，坐标留待 job_delivered）
                 pass
             lines = []
-            challenge_line = self.challenge.start()
-            if challenge_line:
-                lines.append(self.persona.polish(challenge_line))
             preview = self.route_planner.preview(ev.snapshot)
             if preview:
                 lines.append(self.persona.polish(preview))
@@ -1031,15 +1045,7 @@ class PawpilotRuntime:
         await self._archive_trip(ev)
         s = ev.snapshot
         start = self._trip_start.snapshot if self._trip_start else None
-        stats = {
-            "fuel_avg": fuel_avg,
-            "speedings": snap_stats["speedings"],
-            "hard_brakes": snap_stats["hard_brakes"],
-        }
         lines = []
-        settle = self.challenge.settle(stats)
-        if settle:
-            lines.append(self.persona.polish(settle))
         trip = {
             "dst": s.city_dst or (start.city_dst if start else ""),
             "revenue": ev.data.get("revenue", s.job_delivered_revenue),
