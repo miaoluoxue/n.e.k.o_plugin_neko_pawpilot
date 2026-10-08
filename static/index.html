@@ -489,7 +489,13 @@ function renderDiagnostics() {
   items.push({ n:'播报频率', s: FREQ_LABELS[s.broadcast_frequency] || '-', cls: 'good', d: '事件冷却倍率' });
   items.push({ n:'限流剩余', s: (safety.rate_limit_remaining || 0) + 's', cls: 'good', d: '全局限流时钟' });
   items.push({ n:'损伤感知', s: (s.damage !== undefined ? Math.round(s.damage) + '%' : '-'), cls: (s.damage || 0) > 50 ? 'warn' : 'good', d: '货损：job ' + Math.round((s.cargo_damage_job || 0) * 100) + '% / 挂车 ' + Math.round((s.cargo_damage_trailer || 0) * 100) + '%' });
-  items.push({ n:'碰撞加速度', s: (s.accel_g !== undefined ? s.accel_g + ' g' : '-'), cls: 'good', d: '撞一下看峰值，据此设 crash_accel_g（默认 0=关闭）' });
+  items.push({ n:'碰撞加速度', s: (s.accel_g !== undefined ? s.accel_g + ' g' : '-'), cls: 'good', d: '撞一下看峰值（判定阈值 ' + (s.crash_accel_g || 1.5) + 'g）' });
+  var mech = s.mech || {}, lt = s.lights || {};
+  var gearTxt = s.gear === -1 ? 'R' : (s.gear === 0 ? 'N' : (s.gear !== undefined ? s.gear : '-'));
+  var ltOn = [lt.low_beam && '近光', lt.parking && '示宽', lt.brake && '刹车', lt.hazard && '双闪', lt.beacon && '警报', lt.blinker_left && '左转', lt.blinker_right && '右转'].filter(Boolean).join('/');
+  items.push({ n:'档位 / 灯光', s: String(gearTxt), cls: 'good', d: ltOn || '灯光全灭' });
+  items.push({ n:'机务', s: (mech.brake_temp !== undefined ? mech.brake_temp + '°C' : '-'), cls: (mech.brake_temp || 0) > 300 ? 'warn' : 'good', d: '气压 ' + (mech.air_pressure || 0) + ' · 油温 ' + (mech.oil_temp || 0) + ' · 水温 ' + (mech.water_temp || 0) + ' · 电压 ' + (mech.battery_v || 0) + 'V · 着地轮 ' + (mech.wheels_on_ground || 0) });
+  items.push({ n:'地图区域', s: s.in_city ? '市区' : '郊外/高速', cls: 'good', d: '比例尺 ' + (s.map_scale || 0) + (s.map_scale === 3 ? '（1:3 城市）' : (s.map_scale >= 10 ? '（1:19 野外）' : '')) });
   document.getElementById('diagGrid').innerHTML = items.map(i =>
     '<div class="diag-item"><div class="n">' + i.n + '</div><div class="s ' + i.cls + '">' + i.s + '</div><div class="desc">' + i.d + '</div></div>').join('');
   var log = s.decision_log || [];

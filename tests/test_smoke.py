@@ -400,37 +400,36 @@ def test_push_sender_sync_contract():
     assert asyncio.run(ps2.push_fact("x")) is False
 
 
-def test_traffic_light_proposal():
-    """红绿灯路况提议：接近触发 / 冷却挡 / 离开重触发。"""
-    import time as _time
+def test_road_matching_and_facility_queries():
+    """道路匹配（74k 段网格索引）：最近道路/路网密度/前方弯道可用。
 
+    红绿灯提议已删除：实测地图数据里全图仅 194 个红绿灯，站在城市里
+    3km 内 0 个（最近 10.3km），该功能拿现有数据无法成立。
+    """
     from plugin.plugins.neko_pawpilot.core.map_kb import MapKnowledge
-    from plugin.plugins.neko_pawpilot.core.proactive import Proactive
 
     kb = MapKnowledge()
-    assert kb.snapshot().get("facilities", 0) > 0
-    tl = kb.nearest_facility(1734, 6089, kind="traffic_light", max_km=1.2)
-    assert tl and tl["kind"] == "traffic_light"
+    snap = kb.snapshot()
+    assert snap["loaded"] is True
+    assert snap["roads"] > 1000 and snap["facilities"] > 100
 
-    class Snap:
-        on_job = True
-        world_x, world_z = 1734, 6089
-        speed_kmh = 60
-        fuel_percent = 80
-        rest_stop_min = 500
-        time_abs_min = 720
-        delivery_remaining_min = 200
+    # 取一个已知道路端点坐标 → 最近道路距离应≈0
+    road = kb._roads[0]
+    near = kb.nearest_road(road["x"], road["z"], max_km=1.0)
+    assert near is not None, "道路索引应按坐标命中"
+    assert near["distance_km"] < 0.05, f"端点应几乎重合，实际 {near['distance_km']} km"
+    assert near["road_type"], "应带回道路类型"
 
-    p = Proactive(PawpilotConfig(), map_kb=kb)
-    now = _time.time()
-    assert p.traffic_propose(Snap(), now) is not None
-    assert p.traffic_propose(Snap(), now + 1) is None
-    assert p.traffic_propose(Snap(), now + 301) is None
-    far = Snap()
-    far.world_x, far.world_z = 1734 + 3000, 6089
-    assert p.traffic_propose(far, now + 301) is None
-    assert p._last_traffic_light_id is None
-    assert p.traffic_propose(Snap(), now + 302) is not None
+    # 路网密度：城区/枢纽应远大于 0
+    assert kb.road_density(road["x"], road["z"], radius_km=1.0) > 0
+
+    # 前方弯道：不抛异常，返回 None(直) 或弧度值
+    curve = kb.curve_ahead(road["x"], road["z"])
+    assert curve is None or isinstance(curve, float)
+
+    # 远离地图（超出 bbox）→ 找不到道路/设施，不应误报
+    assert kb.nearest_road(500000, 500000, max_km=1.0) is None
+    assert kb.nearest_facility(500000, 500000, kind="fuel", max_km=3.0) is None
 
 
 def test_station_proposal():
@@ -441,9 +440,9 @@ def test_station_proposal():
     from plugin.plugins.neko_pawpilot.core.proactive import Proactive
 
     kb = MapKnowledge()
-    fuel = kb.nearest_facility(1798, 1783, kind="fuel", max_km=2)
+    fuel = kb.nearest_facility(1798, 1783, kind="fuel", max_km=3)
     assert fuel and fuel["kind"] == "fuel"
-    svc = kb.nearest_facility(2477, 6713, kind="service", max_km=2)
+    svc = kb.nearest_facility(2477, 6713, kind="service", max_km=4)
     assert svc and svc["kind"] == "service"
 
     class Snap:
@@ -467,8 +466,10 @@ def test_station_proposal():
     # 高油量接近服务区（长途）
     msg2 = p.station_propose(Snap(2477, 6713, fuel_pct=80), now + 2)
     assert msg2 and "服务区" in msg2
-    # 离开后重置（冷却期内回到同一站不重报，防绕圈）
-    p.station_propose(Snap(5000, 5000, fuel_pct=30), now + 3)
+    # 开到地图外（半径内无任何设施）→ 重置，允许下次重新提醒
+    # 注意：半径已从 1.5/2.0km 放宽到 3/4km，所以这里必须用真正远离全图
+    # 设施的坐标（地图 bbox 约 ±68k），否则近处仍有油站、重置不会发生
+    p.station_propose(Snap(500000, 500000, fuel_pct=30), now + 3)
     assert p._last_station_id is None
 
 
@@ -977,8 +978,8 @@ def test_crash_reports_once_via_llm():
     assert "车祸" in text and "42" in text, f"事实行应含事故与损伤，实际：{text}"
 
 
-def test_crash_accel_channel_opt_in():
-    """碰撞加速度通道：默认关闭（不误报），开启后能抓到"损伤不足 5%"的撞击。"""
+def test_crash_accel_and_window_detection():
+    """碰撞双信号：① 加速度尖峰（默认 1.5g）② 时间窗累计损伤（治刮蹭漏报）。"""
     from plugin.plugins.neko_pawpilot.adapters.telemetry_client import TruckSnapshot
     from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
 
@@ -988,28 +989,46 @@ def test_crash_accel_channel_opt_in():
             setattr(s, k, v)
         return s
 
-    # 默认（crash_accel_g=0）：加速度尖峰不触发碰撞
+    # ① 加速度信号：默认 1.5g 开启；30 m/s² ≈ 3.06g → 判碰撞
     eng = EventEngine(PawpilotConfig())
-    names = []
-    eng.on_event(lambda ev: names.append(ev.name))
-    eng.feed(mk(sdk_active=True, on_job=True, accel_x=30.0))
-    eng.feed(mk(sdk_active=True, on_job=True, accel_x=30.0, wear_cabin=0.02))
-    assert "crash" not in names, "未校准前默认不应凭加速度误报碰撞"
-
-    # 开启后（阈值 3g）：30 m/s² ≈ 3.06g → 触发，且标记来源为 accel
-    raw = {"crash_accel_g": 3.0}
-    eng2 = EventEngine(PawpilotConfig(raw))
     hits = []
-    eng2.on_event(lambda ev: hits.append(ev.data) if ev.name == "crash" else None)
-    eng2.feed(mk(sdk_active=True, on_job=True))
-    eng2.feed(mk(sdk_active=True, on_job=True, accel_x=30.0))
-    assert hits, "开启加速度通道后撞击应被识别"
-    assert hits[-1]["source"] == "accel"
-    assert hits[-1]["accel_g"] >= 3.0
+    eng.on_event(lambda ev: hits.append(ev.data) if ev.name == "crash" else None)
+    eng.feed(mk(sdk_active=True, on_job=True))
+    eng.feed(mk(sdk_active=True, on_job=True, accel_x=30.0))
+    assert hits and hits[-1]["source"] == "accel", "加速度尖峰应判碰撞"
+    assert hits[-1]["accel_g"] >= 1.5
     # 合成值换算：30 m/s² ≈ 3.06 g
     s = TruckSnapshot()
     s.accel_x = 30.0
     assert 3.0 < s.accel_g < 3.2
+    # 关掉该信号（crash_accel_g=0）→ 同样尖峰不判碰撞
+    eng2 = EventEngine(PawpilotConfig({"crash_accel_g": 0}))
+    names = []
+    eng2.on_event(lambda ev: names.append(ev.name))
+    eng2.feed(mk(sdk_active=True, on_job=True))
+    eng2.feed(mk(sdk_active=True, on_job=True, accel_x=30.0))
+    assert "crash" not in names, "crash_accel_g=0 时不应凭加速度判碰撞"
+
+    # ② 时间窗累计：每帧 +2%（都低于单帧阈值 5%），累计跨阈值仍要判碰撞
+    #    这正是实测事故的情形：总损伤 +3~7 点分散在多帧，旧版全程漏报
+    eng3 = EventEngine(PawpilotConfig({"crash_accel_g": 0}))
+    win = []
+    eng3.on_event(lambda ev: win.append(ev.data) if ev.name == "crash" else None)
+    eng3.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.10))
+    for i in range(1, 6):
+        eng3.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.10 + 0.02 * i))
+    assert win, "累计损伤跨阈值应判碰撞（单帧判定会漏）"
+    assert win[-1]["source"] == "damage"
+    assert win[-1]["window_s"] == 5.0
+
+    # ③ 单帧小抖动（+1%，远低于阈值）不该误报
+    eng4 = EventEngine(PawpilotConfig({"crash_accel_g": 0}))
+    soft = []
+    eng4.on_event(lambda ev: soft.append(ev.name))
+    eng4.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.100))
+    eng4.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.103))
+    eng4.feed(mk(sdk_active=True, on_job=True, wear_cabin=0.106))
+    assert "crash" not in soft, "正常磨损增量不该误判碰撞"
 
 
 if __name__ == "__main__":

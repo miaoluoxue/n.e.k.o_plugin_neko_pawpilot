@@ -13,8 +13,8 @@ from ctypes import (
     c_uint,
     c_ulonglong,
 )
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 MMF_NAMES = ["Local\\SCSTelemetry", "SCSTelemetry"]
 MMF_SIZE = 32 * 1024
@@ -378,6 +378,27 @@ class TruckSnapshot:
     accel_x: float = 0.0
     accel_y: float = 0.0
     accel_z: float = 0.0
+    # ── 解析器里早已定义、但历史版本没有上报的可用字段（2026-10 实测全部为真值）──
+    gear: int = 0
+    gear_dashboard: int = 0
+    retarder_brake: int = 0
+    lights_parking: bool = False
+    lights_low_beam: bool = False
+    lights_beacon: bool = False
+    lights_brake: bool = False
+    lights_reverse: bool = False
+    lights_hazard: bool = False
+    blinker_left: bool = False
+    blinker_right: bool = False
+    air_pressure: float = 0.0          # kPa
+    brake_temperature: float = 0.0     # °C
+    oil_temperature: float = 0.0       # °C
+    water_temperature: float = 0.0     # °C
+    battery_voltage: float = 0.0       # V
+    cruise_speed_mps: float = 0.0
+    wheels_on_ground: int = 0
+    warnings: Dict[str, bool] = field(default_factory=dict)
+    map_scale: float = 0.0             # 3=城市(1:3) / 19=野外(1:19)
     is_cargo_loaded: bool = False
     park_brake: bool = False
     engine_enabled: bool = False
@@ -462,6 +483,31 @@ class TruckSnapshot:
             "cabin": self.wear_cabin, "chassis": self.wear_chassis,
             "wheels": self.wear_wheels,
         }
+
+    @property
+    def is_city(self) -> bool:
+        """是否在城市（地图比例尺 1:3 ≈ 3）；野外开阔路是 1:19 ≈ 19。
+
+        实测值：城区 3.0。比"按限速猜市区"可靠（无标线路段限速常为 0）。
+        """
+        return 0.0 < self.map_scale < 10.0
+
+    @property
+    def is_open_road(self) -> bool:
+        return self.map_scale >= 10.0
+
+    @property
+    def blinker_on(self) -> bool:
+        return self.blinker_left or self.blinker_right
+
+    @property
+    def headlights_on(self) -> bool:
+        return self.lights_low_beam
+
+    @property
+    def active_warnings(self) -> list:
+        """当前亮着的故障警告灯（发动机熄火时 oil/battery 常亮，调用方需自行过滤）。"""
+        return [k for k, v in (self.warnings or {}).items() if v]
 
     @property
     def power_type(self) -> str:
@@ -614,6 +660,38 @@ class TelemetryReader:
         s.accel_x = tv.accelerationX
         s.accel_y = tv.accelerationY
         s.accel_z = tv.accelerationZ
+        # 档位 / 缓速器
+        s.gear = m.truck_i.gear
+        s.gear_dashboard = m.truck_i.gearDashboard
+        s.retarder_brake = m.truck_ui.retarderBrake
+        # 灯光 / 转向灯
+        tb_ = m.truck_b
+        s.lights_parking = bool(tb_.lightsParking)
+        s.lights_low_beam = bool(tb_.lightsBeamLow)
+        s.lights_beacon = bool(tb_.lightsBeacon)
+        s.lights_brake = bool(tb_.lightsBrake)
+        s.lights_reverse = bool(tb_.lightsReverse)
+        s.lights_hazard = bool(tb_.lightsHazard)
+        s.blinker_left = bool(tb_.blinkerLeftOn)
+        s.blinker_right = bool(tb_.blinkerRightOn)
+        # 机务数值
+        s.air_pressure = m.truck_f.airPressure
+        s.brake_temperature = m.truck_f.brakeTemperature
+        s.oil_temperature = m.truck_f.oilTemperature
+        s.water_temperature = m.truck_f.waterTemperature
+        s.battery_voltage = m.truck_f.batteryVoltage
+        s.cruise_speed_mps = tf.cruiseControlSpeed
+        s.wheels_on_ground = sum(1 for v in tb_.truck_wheelOnGround if v)
+        s.warnings = {
+            "air_pressure": bool(tb_.airPressureWarning),
+            "air_emergency": bool(tb_.airPressureEmergency),
+            "fuel": bool(tb_.fuelWarning),
+            "adblue": bool(tb_.adblueWarning),
+            "oil_pressure": bool(tb_.oilPressureWarning),
+            "water_temp": bool(tb_.waterTemperatureWarning),
+            "battery": bool(tb_.batteryVoltageWarning),
+        }
+        s.map_scale = float(m.common_f.scale)
         cb = m.config_b
         s.is_cargo_loaded = bool(cb.isCargoLoaded)
         tb = m.truck_b

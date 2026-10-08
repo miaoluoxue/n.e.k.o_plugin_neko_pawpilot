@@ -448,6 +448,27 @@ class PawpilotRuntime:
             "cargo_damage_trailer": round(s.trailer_cargo_damage, 3),
             # 碰撞校准用：面板实时显示加速度合成值（g），据此设 crash_accel_g
             "accel_g": round(s.accel_g, 2),
+            # 2026-10 新接上的遥测：档位/灯光/机务/地图比例尺
+            "gear": s.gear,
+            "gear_dashboard": s.gear_dashboard,
+            "lights": {
+                "low_beam": s.lights_low_beam, "parking": s.lights_parking,
+                "brake": s.lights_brake, "hazard": s.lights_hazard,
+                "beacon": s.lights_beacon, "reverse": s.lights_reverse,
+                "blinker_left": s.blinker_left, "blinker_right": s.blinker_right,
+            },
+            "mech": {
+                "air_pressure": round(s.air_pressure, 1),
+                "brake_temp": round(s.brake_temperature, 1),
+                "oil_temp": round(s.oil_temperature, 1),
+                "water_temp": round(s.water_temperature, 1),
+                "battery_v": round(s.battery_voltage, 1),
+                "wheels_on_ground": s.wheels_on_ground,
+                "warnings": list(s.active_warnings),
+            },
+            "map_scale": round(s.map_scale, 1),
+            "in_city": s.is_city,
+            "crash_accel_g": round(self.cfg.crash_accel_g, 2),
             "recent_activity": self._activity[:20],
             "world": {"x": round(s.world_x, 1), "z": round(s.world_z, 1)},
         })
@@ -542,23 +563,31 @@ class PawpilotRuntime:
                     if scene_topic:
                         await self.push.push_direct(self.persona.polish(scene_topic))
                         continue
-                # 世界坐标定位（M3：有地图数据时播报）
-                if self.map_kb.snapshot().get("loaded") and now - getattr(self, "_last_pos", 0) > 1800:
+                # 地图路况叙事（道路匹配 + 市区/野外 + 弯道 + 服务设施）：5 分钟一次
+                # 走 respond（事实行交宿主 LLM 说话）——旧版是 blind 直出气泡，
+                # 猫娘"从没说过"，用户体感就等于地图数据没用上。
+                if self.map_kb.snapshot().get("loaded") and now - getattr(self, "_last_pos", 0) > 300:
                     self._last_pos = now
                     pos_line = self._world_position_line(snap)
                     if pos_line:
-                        await self.push.push_direct(self.persona.polish(pos_line))
+                        await self.push.push_fact(
+                            self.emotion.custom_fact(pos_line, "proactive"))
                         continue
-                # L3 主动提议（含服务区建议）
-                if self.arbiter.scenario.current in ("DRIVING", "URBAN", "HIGHWAY"):
+                # L3 主动提议（服务区/加油/疲劳/夜间…）
+                # 放宽门控：只要在任务中且未暂停就允许。旧版限定
+                # DRIVING/URBAN/HIGHWAY，而停车等灯时场景被判成 DELIVERY
+                # → 整段提议被跳过（这也是"地图信息没反应"的原因之一）。
+                if snap.on_job and not snap.paused:
                     propose = self.proactive.propose(now)
                     if propose:
-                        await self.push.push_direct(self.persona.polish(propose))
+                        await self.push.push_fact(
+                            self.emotion.custom_fact(propose, "proactive"))
                         continue
                     sa_advice = self.route_planner.service_area_advice(snap)
                     if sa_advice and now - getattr(self, "_last_sa_advice", 0) > 1200:
                         self._last_sa_advice = now
-                        await self.push.push_direct(self.persona.polish(sa_advice))
+                        await self.push.push_fact(
+                            self.emotion.custom_fact(sa_advice, "proactive"))
                         continue
                 # L4 随机闲聊（低频保底，仅驾驶中，按场景话题池）
                 if snap.on_job:
@@ -617,16 +646,41 @@ class PawpilotRuntime:
         return "default"
 
     def _world_position_line(self, snap) -> Optional[str]:
-        """世界坐标 → 定位叙事（M3 地图数据）。"""
-        if not snap or snap.world_x == 0 and snap.world_z == 0:
+        """地图路况叙事：真实道路匹配 + 市区/野外 + 前方弯道 + 最近设施。
+
+        2026-10 实测校准过两件事，所以这里不再"只靠限速猜"：
+        1) 遥测坐标与地图 KB 同坐标系（行驶中最近道路端点仅 11 米）
+        2) `common_f.scale` 直接给出地图比例尺：3=市区(1:3)、19=野外(1:19)
+        """
+        if not snap or (snap.world_x == 0 and snap.world_z == 0):
             return None
+        # 道路等级（限速推断）与地图实测互证
         road = self.map_kb.road_level(snap.speed_limit_kmh)
-        if not road:
-            return None
-        service = self.map_kb.nearest_facility(snap.world_x, snap.world_z, "service")
-        parts = [f"现在在{road}上喵"]
-        if service:
-            parts.append(f"前方 {service['distance_km']:.0f} km 有服务区")
+        nr = self.map_kb.nearest_road(snap.world_x, snap.world_z, max_km=1.0)
+        area = "市区" if snap.is_city else ("郊外/高速" if snap.is_open_road else "")
+        label = road or area or "路上"
+        parts = [f"现在在{label}上喵"]
+        if area and road:
+            parts.append(f"（{area}路段）")
+        if nr:
+            if nr["distance_km"] <= 0.05:
+                parts.append("压在主路上")
+            elif nr["distance_km"] <= 0.5:
+                parts.append(f"离主路约 {nr['distance_km'] * 1000:.0f} 米")
+        # 前方弯道（只报"有弯道+大致角度"，不报左右：车头朝向约定未标定）
+        try:
+            curve = self.map_kb.curve_ahead(snap.world_x, snap.world_z)
+        except Exception:
+            curve = None
+        if curve:
+            parts.append(f"前方约 350 米有急弯（约 {curve * 57.3:.0f}°），提前减速")
+        # 最近服务设施（3 km 内才提）
+        fuel = self.map_kb.nearest_facility(snap.world_x, snap.world_z, "fuel", max_km=3.0)
+        svc = self.map_kb.nearest_facility(snap.world_x, snap.world_z, "service", max_km=3.0)
+        if snap.fuel_percent < 45 and fuel:
+            parts.append(f"前方 {fuel['distance_km']:.1f} km 有加油站")
+        elif svc:
+            parts.append(f"前方 {svc['distance_km']:.1f} km 有服务区")
         return "，".join(parts) + "~"
 
     @staticmethod

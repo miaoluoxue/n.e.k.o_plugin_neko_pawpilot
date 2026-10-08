@@ -73,12 +73,14 @@ class EventEngine:
         self.speeding_escalate_kmh = config.speeding_escalate_kmh
         self.crash_delta = config.crash_damage_delta
         self.crash_accel_g = float(getattr(config, "crash_accel_g", 0.0) or 0.0)
+        self.crash_window_s = float(getattr(config, "crash_damage_window_s", 5.0) or 5.0)
         self.brake_force = config.hard_brake_force
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
         self._last: Optional[TruckSnapshot] = None
         self._fuel_last: Optional[float] = None
         self._damage_last: Optional[float] = None
+        self._damage_hist: List[tuple] = []   # [(ts, max_damage)] 碰撞时间窗
         self._last_fire: dict = {}
         self._warned_low_time = False
         self._warned_over_time = False
@@ -105,6 +107,7 @@ class EventEngine:
         self.speeding_escalate_kmh = config.speeding_escalate_kmh
         self.crash_delta = config.crash_damage_delta
         self.crash_accel_g = float(getattr(config, "crash_accel_g", 0.0) or 0.0)
+        self.crash_window_s = float(getattr(config, "crash_damage_window_s", 5.0) or 5.0)
         self.brake_force = config.hard_brake_force
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
@@ -166,19 +169,32 @@ class EventEngine:
             if ev:
                 out.append(ev)
 
+        # ── 碰撞判定（2026-10 实测重写）──────────────────────────────
+        # 旧版只看"单个采样帧内损伤 +5%"，实测会漏报：刮蹭式撞击的损伤增加
+        # 分散在多次采样里（实测一次事故总 +3~7 点，单帧常 <5 点），结果
+        # 车损涨到 13% 却一次都没播报。
+        # 新版双信号：
+        #   a) 时间窗累计：crash_window_s 秒内 max_damage 累计上升 ≥ crash_delta
+        #   b) 加速度尖峰：撞击瞬间合成加速度 ≥ crash_accel_g（实测撞击 1.80g，
+        #      正常驾驶 <0.4g）
+        now_ts = now
+        self._damage_hist.append((now_ts, s.max_damage))
+        cutoff = now_ts - self.crash_window_s
+        while self._damage_hist and self._damage_hist[0][0] < cutoff:
+            self._damage_hist.pop(0)
         crash_reason = ""
-        if self._damage_last is not None:
-            delta = s.max_damage - self._damage_last
-            if delta > self.crash_delta:
+        window_delta = 0.0
+        if len(self._damage_hist) >= 2:
+            base_dmg = min(d for _, d in self._damage_hist)
+            window_delta = s.max_damage - base_dmg
+            if window_delta > self.crash_delta:
                 crash_reason = "damage"
-        # 加速度信号（可选，config.crash_accel_g > 0 才启用）：轻刮蹭损伤不足
-        # 5% 时"损伤突增"抓不到，但撞击的加速度尖峰抓得到
         if not crash_reason and self.crash_accel_g > 0 and s.accel_g >= self.crash_accel_g:
             crash_reason = "accel"
         if crash_reason:
             ev = self._emit(EV_CRASH, s, {
-                "delta": (s.max_damage - self._damage_last)
-                if self._damage_last is not None else 0.0,
+                "delta": round(window_delta, 4),
+                "window_s": self.crash_window_s,
                 "damage": s.max_damage,
                 "speed_kmh": s.speed_kmh,
                 "accel_g": round(s.accel_g, 2),
@@ -187,6 +203,8 @@ class EventEngine:
                     f"{k} {v * 100:.0f}%" for k, v in s.damage_parts.items()
                     if v > 0.01),
             })
+            # 触发后重置基线，避免同一段损伤在后续窗口里反复报警
+            self._damage_hist = [(now_ts, s.max_damage)]
             if ev:
                 out.append(ev)
         self._damage_last = s.max_damage

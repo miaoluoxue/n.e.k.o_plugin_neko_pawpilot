@@ -53,9 +53,11 @@ event_cooldown_s = 10.0
 time_warn_min = 60
 low_fuel_percent = 15
 crash_damage_delta = 0.05
-# 碰撞加速度信号(g)：0 = 关闭。开启后撞击加速度尖峰也能识别（轻刮蹭损伤
-# 不足 5% 时"损伤突增"抓不到）。先在面板诊断看"碰撞加速度"峰值再设 2.5-4。
-crash_accel_g = 0.0
+# 碰撞时间窗（秒）：窗口内车损累计上升超过上面的阈值即判碰撞（解决"刮蹭式
+# 撞击损伤分散在多帧、单帧不足阈值"导致的漏报——实测曾整场事故零播报）
+crash_damage_window_s = 5.0
+# 碰撞加速度阈值(g)：实测撞击峰值 1.80g、正常驾驶 <0.4g；0 = 关闭该信号
+crash_accel_g = 1.5
 hard_brake_force = 0.9
 hard_brake_speed_kmh = 60
 global_rate_limit_s = 12.0

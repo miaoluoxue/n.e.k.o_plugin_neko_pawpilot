@@ -15,7 +15,6 @@ class Proactive:
         self._last_propose: Dict[str, float] = {}
         self._drive_start_ts: Optional[float] = None
         self._last_drive_snap: Optional[Any] = None
-        self._last_traffic_light_id: Optional[str] = None
         self._last_station_id: Optional[str] = None
 
     def update(self, snap) -> None:
@@ -35,10 +34,6 @@ class Proactive:
         snap = self._last_drive_snap
         if snap is None or not snap.on_job:
             return None
-        # 红绿灯路况（接近路口，每 5 分钟同一灯一次）
-        traffic = self.traffic_propose(snap, now)
-        if traffic:
-            return traffic
         # 加油站/服务区接近（按油量/剩余里程需要）
         station = self.station_propose(snap, now)
         if station:
@@ -71,34 +66,13 @@ class Proactive:
             return "赶时间也别超速喵，稳一点更划算~"
         return None
 
-    def traffic_propose(self, snap, now: float | None = None) -> Optional[str]:
-        """接近红绿灯/路口：提醒减速观察（每灯 5 分钟冷却）。"""
-        if self.map_kb is None or not snap.on_job:
-            return None
-        now = now or time.time()
-        tl = self.map_kb.nearest_facility(snap.world_x, snap.world_z,
-                                          kind="traffic_light", max_km=1.2)
-        if not tl:
-            # 离开搜索半径：重置，下次回来可重新提醒
-            self._last_traffic_light_id = None
-            return None
-        lid = tl.get("id")
-        if lid == self._last_traffic_light_id:
-            return None
-        # 每灯独立冷却
-        if now - self._last_propose.get(f"traffic_{lid}", 0) < 300:
-            return None
-        self._last_propose[f"traffic_{lid}"] = now
-        self._last_traffic_light_id = lid
-        dist = tl.get("distance_km", 0)
-        if dist < 0.3:
-            return "前方路口到啦，注意红绿灯减速喵！"
-        return f"前方 {dist:.1f} km 有路口信号灯，提前收油喵~"
-
     def station_propose(self, snap, now: float | None = None) -> Optional[str]:
         """接近加油站/服务区：按需提醒（油量低→加油，长途→休息）。
 
-        每站 8 分钟冷却；离开搜索半径后重置可重新提醒。
+        半径与冷却按 2026-10 实测标定：全图 1157 加油站 / 97 服务区，
+        实测当前位置 3km 内 9 个加油站、服务区最近 0.11km——原半径
+        1.5/2.0km 太窄，多数时候擦肩而过不触发。改为 3km / 4km，
+        冷却 8 分钟 → 4 分钟。离开搜索半径后重置可重新提醒。
         """
         if self.map_kb is None or not snap.on_job:
             return None
@@ -106,7 +80,7 @@ class Proactive:
         # 油量低 → 找加油站；否则长途 → 找服务区
         low_fuel = snap.fuel_percent < 45
         kind = "fuel" if low_fuel else "service"
-        max_km = 1.5 if low_fuel else 2.0
+        max_km = 3.0 if low_fuel else 4.0
         fac = self.map_kb.nearest_facility(snap.world_x, snap.world_z,
                                            kind=kind, max_km=max_km)
         if not fac:
@@ -115,7 +89,7 @@ class Proactive:
         sid = fac.get("id")
         if sid == self._last_station_id:
             return None
-        if now - self._last_propose.get(f"station_{sid}", 0) < 480:
+        if now - self._last_propose.get(f"station_{sid}", 0) < 240:
             return None
         self._last_propose[f"station_{sid}"] = now
         self._last_station_id = sid
