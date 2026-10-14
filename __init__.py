@@ -197,6 +197,25 @@ class NekoPawpilotPlugin(NekoPluginBase):
             self.logger.warning("pilot_release failed: %s", exc)
             return Err(SdkError("交还驾驶失败喵"))
 
+    @plugin_entry(
+        id="take_photo",
+        name="拍一张",
+        description="把当前画面拍下来存进美景相册。玩家说拍照/拍一张/拍吧/截个图时调用，面板上也有按钮。",
+        input_schema={"type": "object", "properties": {}},
+    )
+    async def action_take_photo(self, **_) -> Any:
+        """主人答应了拍照（或自己在面板上点了按钮）。"""
+        try:
+            if not self.rt:
+                return Err(SdkError("猫爪副驾还没准备好喵"))
+            result = await self.rt.take_photo()
+            if not result.get("ok"):
+                return Ok({"reply": result.get("summary", "")})
+            return Ok({"reply": result.get("summary", ""), "photos": self.rt.photo_album.snapshot()})
+        except Exception as exc:
+            self.logger.warning("take_photo failed: %s", exc)
+            return Err(SdkError("拍照失败了喵"))
+
     @ui.action(id="set_dry_run", label="切换播报开关", tone="primary", group="runtime", order=20, refresh_context=True)
     @plugin_entry(
         id="set_dry_run",

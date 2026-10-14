@@ -64,6 +64,20 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "time_tight":     EventSpec("time_tight", CAT_TASK, 5, False, -1),
     "early_arrival":  EventSpec("early_arrival", CAT_TASK, 4, False, -1),
     "cargo_damage":   EventSpec("cargo_damage", CAT_TASK, 6, False, 30),
+    # ── 机务/操作类（2026-10：主人指出"灯光气压这些采集了就没用过"）──
+    # 这些信号一直躺在遥测里、面板上也显示，但从来没进过播报层
+    "air_pressure_low":  EventSpec("air_pressure_low", CAT_SAFETY, 8, False, 180),
+    "engine_warning":    EventSpec("engine_warning", CAT_SAFETY, 8, False, 240),
+    "park_brake_moving": EventSpec("park_brake_moving", CAT_SAFETY, 8, False, 120),
+    "engine_stalled":    EventSpec("engine_stalled", CAT_SAFETY, 8, False, 120),
+    "overheat":          EventSpec("overheat", CAT_SAFETY, 7, False, 300),
+    "lights_off_night":  EventSpec("lights_off_night", CAT_SAFETY, 7, False, 300),
+    "wheels_airborne":   EventSpec("wheels_airborne", CAT_SAFETY, 7, False, 120),
+    "brake_temp_high":   EventSpec("brake_temp_high", CAT_SAFETY, 6, False, 300),
+    "adblue_low":        EventSpec("adblue_low", CAT_SAFETY, 5, False, 900),
+    "battery_low":       EventSpec("battery_low", CAT_SAFETY, 5, False, 600),
+    "high_beam_on":      EventSpec("high_beam_on", CAT_TRIP, 3, False, 600),
+    "blinker_forgotten": EventSpec("blinker_forgotten", CAT_TRIP, 3, False, 300),
 }
 
 

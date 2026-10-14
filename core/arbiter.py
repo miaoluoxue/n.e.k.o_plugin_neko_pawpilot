@@ -49,7 +49,10 @@ class Arbiter:
     def decide(self, event_name: str, snap, now: float | None = None) -> tuple[bool, str]:
         """判定是否输出；返回 (是否, 理由)。"""
         now = now or time.time()
-        self._decision_log = []
+        # 决策日志改成滚动历史：原来每轮清空，面板永远只看到最后一次判定，
+        # "分段播报为什么没响"这类问题完全查不到
+        if len(self._decision_log) > 60:
+            del self._decision_log[:-40]
         if self.safety.stopped:
             self._log(event_name, "suppressed", self.safety.status())
             return False, self.safety.status()

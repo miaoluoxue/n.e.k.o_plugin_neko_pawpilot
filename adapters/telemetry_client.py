@@ -450,7 +450,16 @@ class TruckSnapshot:
 
     @property
     def is_speeding(self) -> bool:
-        return self.speed_limit_mps > 1.0 and self.speed_mps > self.speed_limit_mps + 0.5
+        """超速判定：留出容差，别为"超 2 km/h"念叨。
+
+        旧版只要超 0.5 m/s（1.8 km/h）就算超速——实测玩家被念「都超 3 了」，
+        而欧卡自己的罚单阈值是超 5~10%，限速牌与遥测本身也有 ±3 km/h 误差。
+        现在要求同时满足：超过限速的 10%，且至少超 5 km/h。
+        """
+        if self.speed_limit_mps <= 1.0:
+            return False
+        over = self.speed_mps - self.speed_limit_mps
+        return over > max(1.4, self.speed_limit_mps * 0.10)
 
     @property
     def fuel_percent(self) -> float:

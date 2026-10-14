@@ -35,10 +35,14 @@ class PhotoAlbum:
                 return scene
         return None
 
-    async def shoot(self, scene: str, ocr: Any) -> Optional[str]:
-        """截屏存相册并返回照片记录；冷却 10 分钟。"""
+    def can_shoot(self, cooldown: float = 600.0) -> bool:
+        return (time.time() - self._last_shot) >= cooldown
+
+    async def shoot(self, scene: str, ocr: Any,
+                    force: bool = False) -> Optional[str]:
+        """截屏存相册并返回照片记录；自动拍有 10 分钟冷却，明确要求可 force。"""
         now = time.time()
-        if now - self._last_shot < 600:
+        if not force and now - self._last_shot < 600:
             return None
         self._last_shot = now
         try:

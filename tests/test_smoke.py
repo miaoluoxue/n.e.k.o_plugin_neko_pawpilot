@@ -27,6 +27,7 @@ from plugin.plugins.neko_pawpilot.core.profile import DriverProfile
 from plugin.plugins.neko_pawpilot.core.recall import Recall
 from plugin.plugins.neko_pawpilot.core.safety_guard import SafetyGuard
 from plugin.plugins.neko_pawpilot.core.scenario import (
+    DRIVING,
     HIGHWAY,
     IDLE,
     URBAN,
@@ -124,14 +125,542 @@ def test_emotion_layer():
     renderer = EmotionRenderer(persona)
     fact = renderer.fact_prompt("speeding", speed=90, limit=80)
     assert "90" in fact and "限速" in fact
-    # 人设提示由宿主导入（名字/称呼）
-    assert "你是" in fact
-    assert persona.name in fact
+    # respond 通道只给「口吻风格」，不再重述人设/口头禅：
+    # 旧版每句都塞"你是X。口头禅：Y"，导致宿主 LLM 句句复读口头禅，
+    # 甚至把这段当外人硬塞的指令而吐槽"这破插件又乱念什么奇怪东西"
+    assert "你是" not in fact
+    assert persona.name not in fact
+    assert "口吻参考" in fact
+    assert "不要逐字念出来" in fact
+    # 而给"插件自建 LLM 写台词"的路径仍然要完整人设
+    assert persona.name in persona.persona_hint()
     line = renderer.short_line("speeding", speed=90, limit=80)
     assert "喵" in line or "！" in line
     assert "worry" in persona.mood.snapshot()
     persona.mood.trigger("excitement", 0.9)
     assert persona.mood.style().get("energy") == "high"
+
+
+def test_speeding_tolerance():
+    """超速容差：别为"超 2 km/h"念叨（实测玩家被念「都超 3 了」）。"""
+    s = TruckSnapshot()
+    s.speed_limit_mps = 80 / 3.6
+    s.speed_mps = 82 / 3.6          # 超 2 km/h → 不报
+    assert not s.is_speeding
+    s.speed_mps = 90 / 3.6          # 超 10 km/h → 报
+    assert s.is_speeding
+    # 低速限速牌：超 3 km/h 也不该报
+    s.speed_limit_mps = 5 / 3.6
+    s.speed_mps = 8 / 3.6
+    assert not s.is_speeding
+    s.speed_mps = 12 / 3.6
+    assert s.is_speeding
+    # 限速未知（0）不误判
+    s.speed_limit_mps = 0.0
+    s.speed_mps = 100 / 3.6
+    assert not s.is_speeding
+
+
+def test_traits_normalization():
+    """宿主导出的 traits 是整句字符串时的回归。
+
+    旧版把字符串当列表：persona_hint() 里 "、".join(str) 会变成
+    「你、是、喵、喵、嘴、硬、心、软…」注入 LLM（她于是吐槽"乱念奇怪东西"），
+    面板 JS 的 traits.slice(0,3).join() 还会抛 TypeError 掐断设置页。
+    """
+    from plugin.plugins.neko_pawpilot.core.mood import Persona
+
+    p = Persona({"name": "YUI", "traits": "嘴硬心软的傲娇，偶尔犯迷糊，粘人"})
+    assert isinstance(p.traits, list)
+    assert p.traits == ["嘴硬心软的傲娇", "偶尔犯迷糊", "粘人"]
+    hint = p.persona_hint()
+    assert p.traits[0] in hint
+    # 逐字插顿号的坏味道必须消失
+    assert "嘴、硬" not in hint
+    assert "你、是" not in hint
+    # 列表输入保持原样；带分隔符的列表项也会拆开
+    p2 = Persona({"traits": ["傲娇", "毒舌、话多"]})
+    assert p2.traits == ["傲娇", "毒舌", "话多"]
+    # 缺失/None 不炸（空 dict 会回落到 sdk stub 里的宿主人设）
+    assert Persona({"traits": None}).traits == []
+    assert isinstance(Persona({}).traits, list)
+
+
+def test_weather_never_claims_rain_from_wipers_alone():
+    """雨刷开着 != 在下雨（欧卡的 wipers 只是开关状态）。
+
+    实测主人反馈"甚至没下雨就说下雨"：旧版只要 wipers 为真就写"外面在下雨"。
+    现在没有画面/OCR 证据时据实描述，有证据才敢确认。
+    """
+    from plugin.plugins.neko_pawpilot.core.companion import DIMENSIONS, Companion
+
+    dim = next(d for d in DIMENSIONS if d.id == "weather")
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.wipers = True
+    s.speed_mps = 60 / 3.6
+    comp = Companion(_cfg())
+    unconfirmed = dim.facts(s, comp.build_context(s))
+    assert "不一定真在下雨" in unconfirmed
+    assert "外面在下雨" not in unconfirmed
+    confirmed = dim.facts(s, comp.build_context(s, rain_confirmed=True))
+    assert "外面在下雨" in confirmed
+
+
+def test_station_propose_without_job():
+    """自由驾驶（没接单）也要能报加油站/服务区距离。"""
+    from plugin.plugins.neko_pawpilot.core.map_kb import MapKnowledge
+    from plugin.plugins.neko_pawpilot.core.proactive import Proactive
+
+    kb = MapKnowledge()
+    fuels = [f for f in kb._facilities if f.get("kind") == "fuel"]
+    assert fuels, "地图 KB 里应有加油站"
+    f0 = fuels[0]
+    p = Proactive(_cfg(), map_kb=kb)
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.on_job = False          # 关键：没接单
+    s.speed_mps = 60 / 3.6
+    s.fuel = 300.0
+    s.fuel_capacity = 1000.0
+    s.world_x, s.world_z = f0["x"], f0["z"]
+    out = p.station_propose(s, now=1_000_000.0)
+    assert out and "加油站" in out
+
+
+def test_content_events_bypass_arbiter():
+    """行程分段/时间提醒等内容类事件必须直接放行（过仲裁会被门控吞掉）。"""
+    from plugin.plugins.neko_pawpilot.core.runtime import CONTENT_EVENTS
+
+    for name in ("trip_progress", "distance_mark", "time_warning", "time_over",
+                 "time_tight", "early_arrival", "tollgate"):
+        assert name in CONTENT_EVENTS
+    # 渲染出来必须是中性事实，不能带"喵"这种已经成句的口吻
+    r = EmotionRenderer(Persona())
+    txt = r.fact_prompt("trip_progress", mark_ratio="一半", km=120, min=95)
+    assert "一半" in txt and "120" in txt
+    assert "喵" not in txt.splitlines()[0]
+
+
+def test_radio_works_without_job():
+    """电台必须能在自由驾驶时播——旧版要求 on_job，导致"电台从来没用过"。"""
+    from plugin.plugins.neko_pawpilot.core.radio import RadioDJ
+
+    cfg = _cfg()
+    dj = RadioDJ(cfg)
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.on_job = False          # 关键：没接单
+    s.speed_mps = 80 / 3.6
+    s.time_abs_min = 23 * 60  # 深夜 → night 段
+    t = 1_000_000.0
+    out = dj.pick(s, t, driving_since=0.0)
+    assert out and "[猫娘电台]" in out and "深夜" in out
+    # 间隔内不再播
+    assert dj.pick(s, t + 10, driving_since=0.0) is None
+    # 过了间隔 + 白天 + 已开很久 → 长途特辑（深夜档优先级更高，所以先把时间挪到白天）
+    s.time_abs_min = 14 * 60
+    out2 = dj.pick(s, t + 10_000, driving_since=6000)
+    assert out2 and "长途" in out2
+    # 有天气线索 → 天气播报
+    dj2 = RadioDJ(cfg)
+    s.time_abs_min = 14 * 60
+    out3 = dj2.pick(s, t, weather="雨")
+    assert out3 and "天气" in out3
+    # 停车/暂停不播
+    s.speed_mps = 0.0
+    dj3 = RadioDJ(cfg)
+    assert dj3.pick(s, t) is None
+    s.speed_mps = 80 / 3.6
+    s.paused = True
+    assert dj3.pick(s, t) is None
+    # 间隔配 0 = 关闭
+    cfg2 = _cfg()
+    cfg2.radio_interval_s = 0.0
+    s.paused = False
+    assert RadioDJ(cfg2).pick(s, t) is None
+
+
+def test_player_remark_is_remembered_and_recalled():
+    """陪玩关键：主人说过的话要记住，之后主动提起（且不短时间重复提）。"""
+    from plugin.plugins.neko_pawpilot.core.companion import DIMENSIONS, Companion
+
+    store = MemoryStore(FakeStore())
+    recall = Recall(store)
+    # 系统指令类不入库
+    recall.on_player_remark("装上遥测")
+    assert not (store.query("player_notes") or {})
+    # 闲聊入库
+    recall.on_player_remark("我今天有点累")
+    recall.on_player_remark("我喜欢夜间跑长途")
+    assert len(store.query("player_notes")) == 2
+    got = recall.recent_remark()
+    assert got == "我喜欢夜间跑长途"       # 取最近一条
+    # 提过之后 30 分钟内不再重复
+    recall.mark_remark_spoken()
+    assert recall.recent_remark() is None
+
+    # 陪玩维度：有这句话才会开"记得你说过"
+    dim = next(d for d in DIMENSIONS if d.id == "remark")
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.speed_mps = 70 / 3.6
+    comp = Companion(_cfg())
+    ctx = comp.build_context(s, remark="我今天有点累")
+    fact = dim.facts(s, ctx)
+    assert "我今天有点累" in fact
+    assert dim.when(s, comp.build_context(s)) is False   # 没有记忆就不该触发
+
+
+def test_vehicle_checks_use_collected_telemetry():
+    """灯光/气压/温度/尿素/电压/手刹/离地轮：采集了就必须用上。
+
+    主人原话："那些灯光胎压乱七八糟的碰撞等都要能用上，不是获取了就没用了"。
+    审计结果：21 个字段采集后从没被读过，这批机务检查把它们接进了播报层。
+    """
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    eng = EventEngine(_cfg())
+
+    def snap(speed=60, **kw):
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.speed_mps = speed / 3.6
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    def run(s, now, prev=None):
+        out = []
+        eng._check_vehicle(s, prev, now, out)
+        return [e.name for e in out]
+
+    # 操作类：手刹没松 / 行驶中熄火（熄火要求"上一帧还着着"的跃变）
+    assert "park_brake_moving" in run(snap(park_brake=True), 1.0)
+    running = snap(engine_enabled=True, speed=40)
+    stalled = snap(engine_enabled=False, speed=40)
+    assert "engine_stalled" not in run(stalled, 1.0)        # 没有前因不误报
+    assert "engine_stalled" in run(stalled, 1.0, prev=running)
+    # 灯光：夜间没开灯；开了灯就不该报
+    night = 22 * 60
+    assert "lights_off_night" in run(snap(speed=50, time_abs_min=night), 2.0)
+    assert "lights_off_night" not in run(
+        snap(speed=50, time_abs_min=night, lights_low_beam=True), 3.0)
+    # 远光常开要连续 30 秒
+    s_hb = snap(lights_high_beam=True, speed=50)
+    assert run(s_hb, 100.0) == []
+    assert "high_beam_on" in run(s_hb, 135.0)
+    # 转向灯忘关要连续 25 秒
+    s_bl = snap(blinker_left=True, speed=50)
+    assert run(s_bl, 200.0) == []
+    assert "blinker_forgotten" in run(s_bl, 230.0)
+    # 仪表报警位（SCS 自己的警告）
+    assert "engine_warning" in run(
+        snap(warnings={"oil_pressure": True}), 300.0)
+    # 刹车气压：认游戏自己的报警位，连续 5 秒才播（不猜单位）
+    s_air = snap(warnings={"air_pressure": True}, air_pressure=95.0)
+    assert run(s_air, 400.0) == []
+    assert "air_pressure_low" in run(s_air, 406.0)
+    # 温度
+    assert "overheat" in run(snap(water_temperature=102), 500.0)
+    assert "brake_temp_high" in run(snap(brake_temperature=300), 501.0)
+    # 尿素 / 电压
+    assert "adblue_low" in run(snap(adblue=50, adblue_capacity=500), 600.0)
+    assert "battery_low" in run(snap(battery_voltage=22.0), 601.0)
+    # 离地轮：必须伴随强冲击才算（避免车型不填数组造成误报）
+    assert "wheels_airborne" not in run(snap(speed=60, wheels_on_ground=0), 700.0)
+    s_w = snap(speed=60, wheels_on_ground=0)
+    s_w.accel_x, s_w.accel_y, s_w.accel_z = 20.0, 0.0, 0.0
+    assert "wheels_airborne" in run(s_w, 701.0)
+    # 停车时不该有任何机务播报
+    assert run(snap(speed=0, park_brake=True, engine_enabled=False,
+                    warnings={"air_pressure": True}), 800.0) == []
+
+
+def test_trip_progress_and_summary_render():
+    """行程分段 / 到货总结：既要有事实行，也要真的被渲染出来。"""
+    from plugin.plugins.neko_pawpilot.core.runtime import CONTENT_EVENTS, PawpilotRuntime
+
+    assert "trip_progress" in CONTENT_EVENTS and "distance_mark" in CONTENT_EVENTS
+    r = EmotionRenderer(Persona())
+    for mark, ratio in ((33, "三分之一"), (50, "一半"), (67, "三分之二"), (100, "全程")):
+        txt = r.fact_prompt("trip_progress", mark_ratio=ratio, km=180, min=150)
+        assert ratio in txt and "180" in txt
+    # 到货结算数据行
+    ts = TripSummary({})
+    fact = ts.build_fact({"dst": "Torino", "distance_km": 188, "revenue": 9000,
+                          "cargo": "废金属", "duration_min": 140,
+                          "speedings": 1, "fuel_avg": 30.2})
+    assert "Torino" in fact and "188" in fact and "9000" in fact
+    assert fact.startswith("[到货结算]")
+    # 渲染层能处理它（_render 走 freight/内容事件分支）
+    kws = {"percent": 50.0, "km": 180.0, "min": 150.0, "mark": 50}
+    assert r.fact_prompt("trip_progress", mark_ratio="一半", **{k: v for k, v in kws.items() if k != "mark"})
+    assert hasattr(PawpilotRuntime, "_finish_trip")
+
+
+class _Ok:
+    """宿主 Result 的 Ok 分支（store.get 就返回这种东西）。"""
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def is_ok(self):
+        return True
+
+    def is_err(self):
+        return False
+
+
+class _Err:
+    def __init__(self, error=""):
+        self.error = error
+
+    def is_ok(self):
+        return False
+
+    def is_err(self):
+        return True
+
+
+class HostLikeStore:
+    """模拟宿主 PluginStore：get/set 都返回 Ok/Err 包装，且可以整体故障。"""
+
+    def __init__(self):
+        self.data = {}
+        self.fail = False
+
+    async def get(self, key, default=None):
+        if self.fail:
+            return _Err("store disabled")
+        return _Ok(self.data.get(key))
+
+    async def set(self, key, value):
+        if self.fail:
+            return _Err("store disabled")
+        self.data[key] = value
+        return _Ok(None)
+
+
+def test_memory_survives_host_result_wrapper():
+    """陪玩记忆的根因回归：宿主 store 返回 Ok(...) 包装，旧版永远读不出来。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.core.memory import STORE_KEY, MemoryStore
+
+    kv = HostLikeStore()
+    m = MemoryStore(kv)
+    m.remember("cities", "Torino", {"count": 2}, importance=0.7)
+    m.remember("player_notes", "我今天有点累", {"ts": 1.0, "text": "我今天有点累"})
+    asyncio.run(m.save())
+
+    m2 = MemoryStore(kv)
+    asyncio.run(m2.load())
+    assert m2.query("cities", "Torino")["count"] == 2      # 旧版这里必然是空
+    assert m2.query("player_notes", "我今天有点累")["text"] == "我今天有点累"
+    assert not m2.is_empty()
+    assert STORE_KEY == "neko_pawpilot:memory"
+
+
+def test_memory_refuses_to_overwrite_with_empty():
+    """空内存态绝不能覆盖非空存档（这正是记忆被清空的那次事故）。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.core.memory import STORE_KEY, MemoryStore
+
+    kv = HostLikeStore()
+    m = MemoryStore(kv)
+    m.remember("cities", "Torino", {"count": 5})
+    asyncio.run(m.save())
+    # 模拟"加载失败的空实例"再次保存（旧 bug 的破坏路径）
+    empty = MemoryStore(kv)
+    asyncio.run(empty.save())
+    assert kv.data[STORE_KEY]["cities"]["Torino"]["count"] == 5
+    # 而且它应该把存档读回内存，而不是继续空着
+    assert empty.query("cities", "Torino")["count"] == 5
+
+
+def test_memory_local_mirror_fallback():
+    """宿主 store 整体坏掉时，本地 JSON 镜像要能把记忆救回来。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.core.memory import MemoryStore
+
+    tmp = pathlib.Path(__file__).parent / ".tmp_mirror_test"
+    tmp.mkdir(parents=True, exist_ok=True)
+    mirror = tmp / "memory_backup.json"
+    try:
+        kv = HostLikeStore()
+        kv.fail = True                       # 宿主 store 坏了
+        m = MemoryStore(kv, mirror_path=mirror)
+        m.remember("cargos", "废金属", {"count": 3, "best_income": 9000})
+        asyncio.run(m.save())
+        assert mirror.exists()
+        assert m.last_error                  # 失败必须留痕，不能静默
+
+        m2 = MemoryStore(kv, mirror_path=mirror)
+        asyncio.run(m2.load())
+        assert m2.query("cargos", "废金属")["count"] == 3
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_opening_story_includes_mileage_and_fuel():
+    """开场播报必须带里程/剩余里程/预计到达 + 这箱油够不够跑完。"""
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    snap = TruckSnapshot()
+    snap.city_src, snap.city_dst, snap.cargo = "Berlin", "Torino", "废金属"
+    snap.planned_distance_km = 480
+    snap.route_distance_km = 400_000.0     # 出发时导航剩余 400 km
+    snap.fuel = 700.0
+    snap.fuel_capacity = 1000.0
+    snap.fuel_range_km = 300.0             # 续航不够
+    snap.time_abs_min = 8 * 60
+    fact = PawpilotRuntime._opening_story_fact(object(), snap)
+    assert "480" in fact and "400" in fact
+    assert "预计 7.4 小时" in fact
+    assert "加油" in fact and "跑不完全程" in fact
+    snap.fuel_range_km = 900.0
+    fact2 = PawpilotRuntime._opening_story_fact(object(), snap)
+    assert "够跑完全程" in fact2
+
+
+def test_photo_album_force_bypasses_cooldown():
+    """明确要求拍照不受 10 分钟冷却限制（自动拍才受限）。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.core.photo_album import PhotoAlbum
+
+    tmp = pathlib.Path(__file__).parent / ".tmp_photo_test"
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    class _Img:
+        def save(self, path):
+            pathlib.Path(path).write_bytes(b"png")
+
+    class _Ocr:
+        def capture(self):
+            return _Img()
+
+    class _P:
+        def data_path(self, *a):
+            return tmp.joinpath(*a)
+
+    try:
+        album = PhotoAlbum(_P())
+        first = asyncio.run(album.shoot("sunset", _Ocr()))
+        assert first and first["scene"] == "sunset"
+        assert album.can_shoot() is False
+        assert asyncio.run(album.shoot("sunset", _Ocr())) is None    # 冷却内
+        forced = asyncio.run(album.shoot("mountain", _Ocr(), force=True))
+        assert forced and forced["scene"] == "mountain"
+        assert album.snapshot()["count"] == 2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_fuel_advice_by_range():
+    """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
+
+    油量 40% 但只剩 30 km 不该劝人加油；油量 55% 但还剩 900 km 必须劝。
+    """
+    from plugin.plugins.neko_pawpilot.core.proactive import Proactive
+
+    p = Proactive(_cfg())
+
+    class _Snap:
+        def __init__(self, rng, remaining, pct):
+            self.fuel_range_km = rng
+            self.route_remaining_km = remaining
+            self.fuel_percent = pct
+            self.world_x = 0.0
+            self.world_z = 0.0
+
+    t = 1_000_000.0
+    # 跑得到 + 油量不低 → 不打扰
+    assert p.fuel_advice(_Snap(600, 200, 70), now=t) is None
+    # 跑不到 → 必须加，且报出差多少
+    out = p.fuel_advice(_Snap(200, 350, 30), now=t)
+    assert out and "跑不到" in out and "150" in out
+    # 刚好够（1.0 ≤ ratio < 1.25）→ 建议顺路补
+    t2 = t + 10_000
+    out2 = p.fuel_advice(_Snap(240, 200, 35), now=t2)
+    assert out2 and "刚好够" in out2
+    # 冷却：同一档 5 分钟内不重复
+    assert p.fuel_advice(_Snap(240, 200, 35), now=t2 + 1) is None
+    # 够跑但油量见底 → 还是提醒补满
+    t3 = t2 + 10_000
+    out3 = p.fuel_advice(_Snap(500, 200, 8), now=t3)
+    assert out3 and "够跑" in out3 and "补满" in out3
+    # 没有任务/续航未知 → 不瞎猜
+    assert p.fuel_advice(_Snap(0, 0, 50), now=t3 + 1) is None
+    assert p.fuel_advice(_Snap(400, 0, 50), now=t3 + 2) is None
+
+
+def test_hud_ocr_degrades_gracefully():
+    """截屏后端降级链：mss 缺失时不能一上来就判定"不可用"。
+
+    实测宿主运行时没有 mss，旧版直接 return False → 识屏永远没工作过。
+    现在 mss → Pillow.ImageGrab 逐级降级；测试环境两边都没有宿主 OCR 组件时
+    必须干净地返回 False/空串，而不是抛异常。
+    """
+    from plugin.plugins.neko_pawpilot.adapters.hud_ocr import PLUGIN_ID, HudOcr
+
+    class _P:
+        def data_path(self, *a):
+            return pathlib.Path(".")
+
+    o = HudOcr(_P())
+    assert PLUGIN_ID == "neko_pawpilot"
+    ok = o.is_available()          # 测试环境无宿主 OCR 组件 → False
+    assert ok is False
+    snap = o.snapshot()
+    assert set(snap) >= {"available", "capture", "error"}
+    assert o.capture() is None
+    assert o.read_text() == ""
+
+
+def test_gdi_capture_works_on_windows():
+    """截屏后端必须有一个"零第三方依赖"的可用路径。
+
+    实测宿主运行时：没有 mss、dxcam 只有残件、PIL 只有 .pyd（ImageGrab 未打包）。
+    所以最后兜底是纯 ctypes 的 GDI BitBlt —— 这条在 Windows 上必须真的能出图。
+    """
+    import sys
+
+    from plugin.plugins.neko_pawpilot.adapters.hud_ocr import _grab_gdi
+
+    if sys.platform != "win32":
+        return
+    img = _grab_gdi((0, 0, 120, 80))
+    assert img.size == (120, 80)
+    assert img.mode == "RGB"
+    # 至少能拿到画面内容（全黑也算有效，但不能是空对象）
+    assert img.getpixel((60, 40)) is not None
+
+
+def test_top_entries_regression():
+    """回归：记忆一旦有数据，面板 API 曾被整片搞崩。
+
+    旧写法 `for k, v in memory.best(...)` 拿的是字典 key 去解包 → 记忆一多就
+    ValueError: too many values to unpack，get_panel_state/dashboard_state 全挂，
+    面板永远停在「加载中」，用户观感就是"设置改了没反应"。
+    """
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    class _Mem:
+        def query(self, kind=None):
+            return {
+                "Berlin": {"count": 3, "weight": 5.0},
+                "Paris": {"count": 1, "weight": 1.0},
+                "route_Paris_Berlin": {"count": 2, "weight": 9.0},
+                "gone": {"count": 1, "weight": 99.0, "archived": True},
+            }
+
+    fake = type("FakeRuntime", (), {"memory": _Mem()})
+    out = PawpilotRuntime._top_entries(fake, "cities")
+    assert [e["key"] for e in out] == ["Berlin", "Paris"]
 
 
 def test_memory_system():
@@ -182,6 +711,12 @@ def test_scenario_machine():
     assert sm.update(mk(40, 50)) == URBAN
     assert sm.allow("safety") is True
     assert sm.allow("task") is True
+    # 自由驾驶（没接单但在跑）也必须算驾驶：否则 task/trip 全被门控挡掉，
+    # 玩家不开任务时只剩超速提醒
+    assert sm.update(mk(60, 70, on_job=False)) == DRIVING
+    assert sm.allow("trip") is True
+    assert sm.allow("chatter") is True
+    assert sm.update(mk(0, 70, on_job=False, sdk=False)) == IDLE
 
 
 def test_safety_guard():
@@ -221,11 +756,17 @@ def test_arbiter():
     # 冷却内拒绝
     allowed, reason = arb.decide("speeding", snap)
     assert allowed is False and reason == "cooldown"
-    # 场景门控：IDLE 下 task 类被挡
+    # 场景门控：停车且没接单（IDLE）时 task 类被挡
     snap.on_job = False
+    snap.speed_mps = 0.0
     arb.update_scenario(snap)
     allowed, reason = arb.decide("job_start", snap)
     assert allowed is False and reason.startswith("scenario_gated")
+    # 自由驾驶（没接单但在跑）不再被门控
+    snap.speed_mps = 90 / 3.6
+    arb.update_scenario(snap)
+    assert arb.scenario.current == DRIVING
+    assert arb.scenario.allow("trip") is True
     # 类别开关
     arb.broadcast_categories["trip"] = False
     snap.on_job = True
@@ -365,6 +906,95 @@ def test_profile():
     assert "首 100km" in snap["milestones"] or "首 1000km" in snap["milestones"]
 
 
+def test_companion_dimensions():
+    """陪玩维度引擎：要能覆盖多个维度、受类别开关与全局间隔约束。"""
+    from plugin.plugins.neko_pawpilot.core.companion import DIMENSIONS, Companion
+    cfg = _cfg()
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.on_job = True
+    s.speed_mps = 90 / 3.6
+    s.speed_limit_mps = 90 / 3.6
+    s.time_abs_min = 22 * 60
+    s.wipers = True
+    s.fuel = 300.0
+    s.fuel_capacity = 1000.0
+    s.cargo = "Machinery"
+    s.planned_distance_km = 300.0
+    s.route_distance_km = 200_000.0
+    s.cruise_control = True
+    s.cruise_speed_mps = 90 / 3.6
+    s.map_scale = 19.0  # 郊外开阔路
+    comp = Companion(cfg)
+    ctx = comp.build_context(s, drive_min=90.0, odometer_km=1500.0, trips=4,
+                             top_city="Berlin")
+    cats = {k: True for k in ("safety", "task", "trip", "lifecycle", "chatter")}
+    hits, now = [], 1_000_000.0
+    step = max(60.0, cfg.companion_gap_s + 10.0)
+    for _ in range(60):
+        r = comp.next_fact(s, ctx, now=now, categories=cats, gap_multiplier=1.0)
+        if r is None:
+            now += 30.0
+            continue
+        hits.append(r["id"])
+        assert r["fact"].startswith("[陪玩·")
+        assert "角度" in r["fact"]
+        # 要求行由 compose_fact 统一追加，陪玩维度自己不再塞第二段指令
+        assert "请以猫娘语气" not in r["fact"]
+        now += step
+    # "陪玩是方方面面的"：一轮下来至少覆盖 6 个不同维度
+    assert len(set(hits)) >= 6, hits
+    # 全局最小间隔：刚说完一条，紧接着 1 秒内不再出第二条
+    comp3 = Companion(cfg)
+    t0 = 5_000_000.0
+    assert comp3.next_fact(s, ctx, now=t0, categories=cats, gap_multiplier=1.0) is not None
+    assert comp3.next_fact(s, ctx, now=t0 + 1.0, categories=cats, gap_multiplier=1.0) is None
+    # 类别开关：关掉 chatter 后不再产出 chatter 维度
+    cat_of = {d.id: d.category for d in DIMENSIONS}
+    comp2 = Companion(cfg)
+    cats2 = dict(cats, chatter=False)
+    got, t = [], 2_000_000.0
+    for _ in range(60):
+        r = comp2.next_fact(s, ctx, now=t, categories=cats2, gap_multiplier=1.0)
+        if r is None:
+            t += 30.0
+            continue
+        got.append(r["id"])
+        t += step
+    assert got, "关掉 chatter 后仍有非闲聊维度可用"
+    assert all(cat_of[i] != "chatter" for i in got), got
+    # 总开关
+    cfg.companion_enabled = False
+    assert Companion(cfg).next_fact(s, ctx, now=t + 999, categories=cats) is None
+
+
+def test_runtime_constructs():
+    """运行时装配冒烟：保证改线后插件还能正常起来（导入 + 组件装配）。"""
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    class _Logger:
+        def info(self, *a, **k):
+            pass
+
+        def warning(self, *a, **k):
+            pass
+
+    tmp = pathlib.Path(__file__).parent / ".tmp_runtime_test"
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        plug = FakePlugin(tmp)
+        plug.logger = _Logger()
+        rt = PawpilotRuntime(plug, _cfg())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # 陪玩维度引擎已装配，且维度数量够"方方面面"
+    snap = rt.companion.snapshot()
+    assert snap["dimensions"] >= 12
+    assert rt.companion.gap_s > 0
+    # 地图叙事已并入陪玩维度，旧的独立入口不应再存在
+    assert not hasattr(rt, "_world_position_line")
+
+
 def test_small_talk():
     st = SmallTalk()
     assert st.random_topic(now=time.time() + 1)
@@ -444,7 +1074,7 @@ def test_push_sender_sync_contract():
             return {"submitted": True}
 
     fp = _FakePlugin()
-    ps = PushSender(fp, dry_run=False)
+    ps = PushSender(fp, dry_run=False, gap_chat=0.0)
     assert asyncio.run(ps.push_fact("测试")) is True
     assert fp.calls and fp.calls[0]["ai_behavior"] == "respond"
     assert asyncio.run(ps.push_direct("直出")) is True
@@ -458,6 +1088,62 @@ def test_push_sender_sync_contract():
     rp = _RejectPlugin()
     ps2 = PushSender(rp, dry_run=False)
     assert asyncio.run(ps2.push_fact("x")) is False
+
+
+def test_push_priority_queue():
+    """播报秩序："紧急先走，闲聊排队"。
+
+    这是主人明确要的规则：事故类立刻冲过去、内容类不挤车道、闲聊一律排队，
+    紧急之后的 60 秒内不许闲聊插嘴。
+    """
+    import asyncio
+    import time as _time
+
+    from plugin.plugins.neko_pawpilot.adapters.push_sender import (
+        CHAT,
+        CRITICAL,
+        IMPORTANT,
+        PushSender,
+    )
+
+    class _FakePlugin:
+        def __init__(self):
+            self.calls = []
+            self.logger = None
+
+        def push_message(self, **kw):
+            self.calls.append(kw["parts"][0]["text"])
+            return {"submitted": True}
+
+    fp = _FakePlugin()
+    ps = PushSender(fp, dry_run=False, gap_important=6.0, gap_chat=45.0)
+
+    # 第一条重要内容立发，紧接着的第二条排队（不抢车道）
+    assert asyncio.run(ps.push_fact("内容1", priority=IMPORTANT)) is True
+    assert asyncio.run(ps.push_fact("内容2", priority=IMPORTANT)) is False
+    assert ps.pending() == 1
+    # 闲聊同样排队
+    assert asyncio.run(ps.push_fact("闲聊1", priority=CHAT)) is False
+    assert ps.pending() == 2
+    # 紧急：立刻发 + 把排队的闲聊丢掉 + 之后静默
+    assert asyncio.run(ps.push_fact("撞车了", priority=CRITICAL)) is True
+    assert all(q["priority"] != CHAT for q in ps._queue), ps._queue
+    assert asyncio.run(ps.push_fact("闲聊2", priority=CHAT)) is False
+    assert "闲聊2" not in fp.calls
+    # 车道空出来（把上次发送时间往前推）→ drain 放行排队的内容
+    ps._last_sent = _time.time() - 120
+    assert asyncio.run(ps.drain()) is True
+    assert fp.calls[-1] == "内容2", fp.calls
+    assert ps.pending() == 0
+    # 队列超时作废：过期的闲聊不该在十分钟后突然冒出来
+    ps._chat_mute_until = 0.0            # 模拟紧急静默期已过
+    ps._last_sent = _time.time() - 120
+    assert asyncio.run(ps.push_fact("旧闲聊", priority=CHAT, ttl=10.0)) is True
+    ps._queue.append({"text": "过期的话", "kind": "respond", "priority": CHAT,
+                      "ts": _time.time() - 999, "ttl": 10.0, "lanlan": ""})
+    ps._last_sent = _time.time() - 120
+    assert asyncio.run(ps.drain()) is False
+    assert "过期的话" not in fp.calls
 
 
 def test_road_matching_and_facility_queries():
@@ -1254,3 +1940,7 @@ if __name__ == "__main__":
     print("profile OK")
     test_small_talk()
     print("small_talk OK")
+    test_companion_dimensions()
+    print("companion OK")
+    test_runtime_constructs()
+    print("runtime OK")

@@ -52,6 +52,17 @@ EV_FERRY = "ferry"                  # 上渡轮（带真实站点名 → 地名�
 EV_TRAIN = "train"                  # 上火车（同上）
 EV_MOUNTAIN_PASS = "mountain_pass"  # 翻越山口/长坡（按海拔变化判定）
 
+# SCS 警告位 → 中文（仪表报警播报用；键名与 TruckSnapshot.warnings 一致）
+_WARNING_LABELS = {
+    "air_pressure": "气压报警",
+    "air_emergency": "气压紧急",
+    "fuel": "燃油报警",
+    "adblue": "尿素报警",
+    "oil_pressure": "机油压力",
+    "water_temp": "水温报警",
+    "battery": "电压报警",
+}
+
 # 货损播报档位（损伤 0-1）：完好率跌破 95% 起报，恶化到 80%/50% 再报
 CARGO_DAMAGE_BANDS = (0.05, 0.20, 0.50)
 # 车损播报档位（损伤 0-1）：25%/50%/75% 各报一次（修车后重新武装）
@@ -104,6 +115,11 @@ class EventEngine:
         self._sinks: List[Callable[[TruckEvent], None]] = []
         self._last_speeding_fire = 0.0
         self._last_speeding_speed = 0.0
+        # 机务层的"连续状态"计时（远光/转向灯开着多久了、手刹/气压是否已报过）
+        self._high_beam_since: float = 0.0
+        self._blinker_since: float = 0.0
+        self._air_low_since: float = 0.0
+        self._warned_report: dict = {}
 
     def apply_config(self, config: object) -> None:
         """热更新阈值。"""
@@ -226,7 +242,10 @@ class EventEngine:
                 out.append(ev)
         self._fuel_last = s.fuel
 
-        if s.fuel_capacity > 0 and s.fuel_percent < self.low_fuel_pct:
+        # 只在真的在开车时才报低油量：主菜单里共享内存会残留上一辆车的
+        # fuelCapacity 而 fuel 已经归零，旧条件会误判成"没油了"（实测面板 0% + 该加油了）
+        if (s.fuel_capacity > 0 and s.fuel_percent < self.low_fuel_pct
+                and (s.sdk_active or s.speed_kmh > 1.0)):
             if not self._warned_low_fuel:
                 ev = self._emit(EV_LOW_FUEL, s, {"percent": s.fuel_percent})
                 if ev:
@@ -431,8 +450,110 @@ class EventEngine:
                         out.append(ev)
                         self._alt_hist = [(now, s.world_y)]
 
+        # 机务/操作检查（灯光、气压、温度、尿素、电压、手刹、离地轮…）
+        self._check_vehicle(s, prev, now, out)
+
         self._last = s
         return out
+
+    # ── 机务/操作层 ───────────────────────────────────────────────
+    # 2026-10 主人反馈："灯光胎压乱七八糟的碰撞等都要能用上，不是获取了就没用了"。
+    # 这些信号本来就一直在遥测里（面板也显示），但从来没有进入播报层。
+    def _check_vehicle(self, s: TruckSnapshot, prev: Optional[TruckSnapshot],
+                       now: float, out: List[TruckEvent]) -> None:
+        speed = float(s.speed_kmh or 0.0)
+
+        def fire(name: str, data: dict = None, force: bool = True) -> None:
+            ev = self._emit(name, s, data or {}, now=now, force=force)
+            if ev:
+                out.append(ev)
+
+        # ① 行驶中熄火（要求"上一帧还着着"的跃变，避免引擎字段缺省 False 时误报）/
+        #    手刹没松：都是"车在动但状态不对"
+        if speed > 20 and prev is not None and prev.engine_enabled \
+                and not s.engine_enabled:
+            fire("engine_stalled", {"speed": speed})
+        if speed > 5 and s.park_brake:
+            fire("park_brake_moving", {"speed": speed})
+
+        # ② 轮胎离地/翻滚：truck_wheelOnGround 是 16 槽数组，"0 个着地"只有在
+        #    伴随强冲击时才可信（否则可能是该车型没填这个数组）——所以和加速度挂钩，
+        #    只在真出事时播，不会因为拿不到数据就乱喊
+        if speed > 15 and int(s.wheels_on_ground or 0) == 0 and s.accel_g >= 1.2:
+            fire("wheels_airborne", {"speed": speed, "accel_g": round(s.accel_g, 2)})
+
+        # ③ 刹车气压：**不猜单位**。SCS 的 airPressure 各家记录不一致，
+        #    权威信号是游戏自己点亮的报警位（airPressureWarning / Emergency）。
+        #    数值只作为附注原样带出。
+        warn = getattr(s, "warnings", {}) or {}
+        if speed > 3 and (warn.get("air_pressure") or warn.get("air_emergency")):
+            if not self._air_low_since:
+                self._air_low_since = now
+            elif now - self._air_low_since >= 5.0:
+                fire("air_pressure_low",
+                     {"bar": float(s.air_pressure or 0.0),
+                      "emergency": bool(warn.get("air_emergency"))})
+                self._air_low_since = 0.0
+        else:
+            self._air_low_since = 0.0
+
+        # ④ 仪表报警（SCS 自己的警告位：油压/水温/气压/电压…）
+        #    气压/尿素/燃油/电压都有各自的专属事件，这里排除掉避免同一件事报两遍
+        _dedicated = {"air_pressure", "air_emergency", "adblue", "fuel", "battery"}
+        warn_on = [k for k, v in (getattr(s, "warnings", {}) or {}).items()
+                   if v and k not in _dedicated]
+        if warn_on and speed > 3:
+            key = ",".join(sorted(warn_on))
+            if self._warned_report.get("warnings") != key:
+                self._warned_report["warnings"] = key
+                fire("engine_warning", {"flags": key,
+                                        "text": "、".join(_WARNING_LABELS.get(w, w)
+                                                          for w in sorted(warn_on))})
+        elif not warn_on:
+            self._warned_report.pop("warnings", None)
+
+        # ⑤ 水温/油温过高、刹车过热（各报一次，冷却到点后允许再报）
+        if (s.water_temperature or 0) >= 100 or (s.oil_temperature or 0) >= 115:
+            fire("overheat", {"water": float(s.water_temperature or 0),
+                              "oil": float(s.oil_temperature or 0)})
+        if speed > 10 and (s.brake_temperature or 0) >= 250:
+            fire("brake_temp_high", {"temp": float(s.brake_temperature or 0),
+                                     "retarder": bool(s.retarder_brake)})
+
+        # ⑥ 尿素 / 电压（只在真的在开时提，避免停车场里瞎念叨）
+        if speed > 3 and (s.adblue_capacity or 0) > 0:
+            pct = float(s.adblue or 0) / float(s.adblue_capacity) * 100.0
+            if pct < 15.0:
+                fire("adblue_low", {"percent": pct})
+        if speed > 3 and 0 < (s.battery_voltage or 0) < 23.5:
+            fire("battery_low", {"volt": float(s.battery_voltage or 0)})
+
+        # ⑦ 夜间没开灯（游戏内时间 20:00-05:00，车速起来才管）
+        #    time_abs_min=0 表示还没拿到游戏内时间，不能当成"半夜"误报
+        hour = int((s.time_abs_min or 0) // 60) % 24
+        if s.time_abs_min and speed > 25 and (hour >= 20 or hour < 5) \
+                and not s.lights_low_beam and not s.lights_parking \
+                and not s.lights_high_beam:
+            fire("lights_off_night", {"hour": hour})
+
+        # ⑧ 远光常开（连续 30 秒）/ 转向灯忘关（连续 25 秒）
+        if s.lights_high_beam and speed > 10:
+            self._high_beam_since = self._high_beam_since or now
+            if now - self._high_beam_since >= 30.0:
+                fire("high_beam_on", {"speed": speed})
+                self._high_beam_since = 0.0
+        else:
+            self._high_beam_since = 0.0
+
+        blinker = bool(s.blinker_left or s.blinker_right)
+        if blinker and speed > 20:
+            self._blinker_since = self._blinker_since or now
+            if now - self._blinker_since >= 25.0:
+                fire("blinker_forgotten",
+                     {"side": "左" if s.blinker_left else "右"})
+                self._blinker_since = 0.0
+        else:
+            self._blinker_since = 0.0
 
     def run_forever(self, interval: float = 1.0) -> None:
         """轮询循环（带重连）：游戏未运行时等待重试。"""

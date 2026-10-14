@@ -53,12 +53,16 @@ DEFAULTS = {
     "pilot_steer_gain": 1.6,          # 横向偏角 → 转向指令增益
     "pilot_steer_step": 6.0,          # 每拍鼠标相对位移上限（像素）
     "pilot_max_lateral_m": 8.0,       # 横向偏差超过即交还（安全带）
+    # ── 陪玩维度引擎（2026-10：主人定调"陪玩是方方面面的"）──
+    "companion_enabled": True,        # 陪玩维度总开关
+    "companion_gap_s": 90.0,          # 两条主动陪聊的最小间隔（秒）；再乘播报频率倍率
+                                      # 安静 144s / 标准 90s / 活跃 58s
     "broadcast_categories": {
         "safety": True,
         "task": True,
         "trip": True,
         "lifecycle": True,
-        "chatter": False,
+        "chatter": True,
     },
     # 遥测插件路径（相对游戏根目录）
     "telemetry_plugin_rel": "bin/win_x64/plugins/scs-telemetry.dll",
@@ -117,6 +121,8 @@ class PawpilotConfig:
         self.pilot_steer_gain = float(data.get("pilot_steer_gain", DEFAULTS["pilot_steer_gain"]))
         self.pilot_steer_step = float(data.get("pilot_steer_step", DEFAULTS["pilot_steer_step"]))
         self.pilot_max_lateral_m = float(data.get("pilot_max_lateral_m", DEFAULTS["pilot_max_lateral_m"]))
+        self.companion_enabled = bool(data.get("companion_enabled", DEFAULTS["companion_enabled"]))
+        self.companion_gap_s = float(data.get("companion_gap_s", DEFAULTS["companion_gap_s"]))
         self.broadcast_categories = dict(data.get("broadcast_categories", DEFAULTS["broadcast_categories"]))
         self.telemetry_plugin_rel = str(data.get("telemetry_plugin_rel", DEFAULTS["telemetry_plugin_rel"]))
         self.telemetry_bundle_rel = str(data.get("telemetry_bundle_rel", DEFAULTS["telemetry_bundle_rel"]))

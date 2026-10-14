@@ -4,8 +4,28 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+_TRAIT_SPLIT_RE = re.compile(r"[，,、;；/\s]+")
+
+
+def _normalize_traits(raw: Any) -> list:
+    """traits 统一成字符串列表（宿主可能给字符串/列表/带空格的混写）。"""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [t.strip() for t in _TRAIT_SPLIT_RE.split(raw) if t.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        out = []
+        for item in raw:
+            if isinstance(item, str):
+                out.extend(t.strip() for t in _TRAIT_SPLIT_RE.split(item) if t.strip())
+            elif item:
+                out.append(str(item))
+        return out
+    return [str(raw)]
 
 MOOD_DEFAULTS = {
     "mood_pool": ["excitement", "worry", "sleepy", "sympathy", "proud", "calm"],
@@ -164,7 +184,13 @@ class Persona:
             data = _load_host_persona() or {}
         self.name = data.get("name", "喵喵")
         self.user_call = data.get("user_call", "主人")
-        self.traits: list = data.get("traits", [])
+        # 宿主导出的 traits 可能是**一个字符串**（实测就是整句"嘴硬心软的傲娇…"），
+        # 旧版直接当列表用，后果很严重：
+        #   1) "、".join(字符串) 会在每个字之间插顿号 → 注入 LLM 的人设提示变成
+        #      「你、是、喵、喵、嘴、硬、心、软…」，宿主 LLM 会吐槽"乱念奇怪东西"
+        #   2) 面板 JS 的 traits.slice(0,3).join() 直接抛 TypeError，
+        #      设置页卡在后半段不渲染（口吻/频率/类别三张卡全空）
+        self.traits: list = _normalize_traits(data.get("traits", []))
         self.description = data.get("description", "")
         self.habits: dict = data.get("habits", {})
         self._voice_styles = _load_voice_styles()
@@ -227,6 +253,19 @@ class Persona:
             if not text.endswith(("喵", "呢", "哦", "啦", "呀")):
                 text += self._rng.choice(["喵", "呢", "啦", "呀"])
         return text
+
+    def style_note(self) -> str:
+        """只给"口吻风格"这一条（不重述人设/名字/口头禅）。
+
+        respond 通道（宿主 LLM 说话）不能用 persona_hint：宿主本来就知道自己是谁，
+        每句都塞一遍「你是X。口头禅：Y」会让它句句复读口头禅（实测每句都以
+        「喂笨蛋主人！」开头），严重时还会把这段当成别人硬塞的指令而吐槽
+        「这破插件又乱念什么奇怪东西」。
+        """
+        prompts = [self._voice_styles.get(s, {}).get("prompt", "")
+                   for s in self.voice_styles]
+        prompts = [p for p in prompts if p]
+        return " ".join(prompts)
 
     def persona_hint(self) -> str:
         """人设提示：主人设 + 多口吻融合，注入 LLM 让宿主按此演绎。"""

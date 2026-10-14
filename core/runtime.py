@@ -7,12 +7,14 @@ import time
 from typing import Any, Dict, Optional
 
 from ..adapters.llm_client import LLMProvider
-from ..adapters.push_sender import PushSender
+from ..adapters.push_sender import CHAT, CRITICAL, IMPORTANT, PushSender
 from ..adapters.telemetry_client import TelemetryReader
 from ..adapters.telemetry_installer import TelemetryInstaller
 from ..catgirl.bridge import CatgirlBridge
 from .arbiter import Arbiter
+from .companion import Companion
 from .config_model import PawpilotConfig
+from .event_catalog import BROADCAST_FREQUENCY_MULTIPLIERS
 from .event_engine import EventEngine, TruckEvent
 from .knowledge import KnowledgeBase
 from .ledger import Ledger
@@ -59,6 +61,37 @@ ACTIVITY_TITLES = {
     "cargo_damage": "货物受损",
 }
 
+# 内容类事件：一次性 / 长间隔的真实内容，直接 respond，不参与仲裁限流。
+# 实测教训：过仲裁时它们会被"场景门控"或限流单槽窗口吞掉，主人反馈
+# "任务分段播报、时间提醒、收费站从没响过"。
+CONTENT_EVENTS = frozenset({
+    "trip_progress",   # 1/3、1/2、2/3 分段播报
+    "distance_mark",   # 剩余距离锚点预告
+    "time_warning",    # 交付时间提醒
+    "time_over",       # 超时
+    "time_tight",      # 时间紧张
+    "time_relaxed",    # 时间宽裕
+    "early_arrival",   # 提前到达
+    "tollgate",        # 过收费站
+    "trailer_attach",  # 挂上挂车
+    "trailer_detach",  # 卸下挂车
+})
+
+# 紧急事件：立即播、并且让闲聊整体安静一会儿（"紧急先走，闲聊排队"）
+CRITICAL_EVENTS = frozenset({
+    "crash",            # 事故
+    "wheels_airborne",  # 翻车/离地
+    "engine_stalled",   # 行驶中熄火
+})
+
+
+def _memory_mirror_path(plugin: Any) -> Optional[str]:
+    """记忆的本地 JSON 兜底路径（宿主 store 出问题时还能救回来）。"""
+    try:
+        return str(plugin.data_path("memory_backup.json"))
+    except Exception:                       # noqa: BLE001
+        return None
+
 
 class PawpilotRuntime:
     """插件运行时。"""
@@ -76,8 +109,9 @@ class PawpilotRuntime:
         self.arbiter = Arbiter(config, self.safety)
         self.arbiter.broadcast_categories = dict(config.broadcast_categories)
         self.arbiter.broadcast_frequency = config.broadcast_frequency
-        self.push = PushSender(plugin, dry_run=config.dry_run)
-        self.memory = MemoryStore(plugin.store)
+        self.push = PushSender(plugin, dry_run=config.dry_run, on_push=self._note_push,
+                               gap_chat=float(getattr(config, "companion_gap_s", 90.0) or 90.0))
+        self.memory = MemoryStore(plugin.store, mirror_path=_memory_mirror_path(plugin))
         self.recall = Recall(self.memory)
         self.ledger = Ledger(self.memory)
         self.trip_summary = TripSummary({})
@@ -88,6 +122,9 @@ class PawpilotRuntime:
         self.places = PlaceBook(self.memory)
         self.radio = RadioDJ(config)
         self.small_talk = SmallTalk(persona=self.persona)
+        # 陪玩维度引擎（2026-10 主人定调"陪玩是方方面面的"）：十几个维度轮转，
+        # 每条只投事实行，措辞交给宿主 LLM 按人设演绎
+        self.companion = Companion(config, map_kb=self.map_kb)
         self.pilot = CatPilot(persona=self.persona, map_kb=self.map_kb, cfg=config)
         self.profile = DriverProfile(self.memory)
         self.scene_chat = SceneChat()
@@ -101,7 +138,9 @@ class PawpilotRuntime:
         self._game_dir: Optional[str] = None
         self.ocr_regions = self._load_ocr_regions()
         self.hud_ocr = None  # 惰性：OCR 可用时创建
-        self._ocr_interval = float(self.ocr_regions.get("scan_interval_s", 600))
+        self._pending_photo_scene: str = ""
+        self._pending_photo_until: float = 0.0
+        self._ocr_interval = float(self.ocr_regions.get("scan_interval_s", 240))
         self._last_ocr_at = 0.0
         self._tick_task: Optional[asyncio.Task] = None
         self._propose_task: Optional[asyncio.Task] = None
@@ -123,6 +162,10 @@ class PawpilotRuntime:
         self._game_running: bool = False
         self._activity: list = []
         self._bg_tasks: set = set()
+
+    def _note_push(self) -> None:
+        """任何一条推送落地时打时间戳：陪聊要给它让路（别把事件内容挤掉）。"""
+        self._last_push_at = time.time()
 
     def _spawn(self, coro) -> None:
         """创建后台任务并跟踪，防泄漏；异常打日志。
@@ -174,6 +217,9 @@ class PawpilotRuntime:
         path = self._ui_settings_path()
         tmp = path.with_suffix(".json.tmp")
         try:
+            # data/config 可能整个缺失（安装包未带 data/ 或用户手动清过），
+            # 旧版这里不建目录 → 写 .tmp 直接 OSError → 面板所有开关"存了等于没存"
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                            encoding="utf-8")
             os.replace(tmp, path)
@@ -261,6 +307,7 @@ class PawpilotRuntime:
         path = self._ui_settings_path()
         tmp = path.with_suffix(".json.tmp")
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                            encoding="utf-8")
             os.replace(tmp, path)
@@ -394,6 +441,7 @@ class PawpilotRuntime:
             "broadcast_categories": arb.get("broadcast_categories", {}),
             "safety": arb.get("safety", {}),
             "decision_log": self.arbiter.decision_snapshot(),
+            "companion": self.companion.snapshot(),
             "ledger": self.ledger.month_summary(),
             "profile": self.profile.snapshot(),
             "level": self.level_celebrate.snapshot().get("level", 0),
@@ -474,8 +522,22 @@ class PawpilotRuntime:
         return base
 
     def _top_entries(self, kind: str) -> list:
-        """记忆 top 条目（带 key 字段给面板展示）。"""
-        return [{"key": k, **v} for k, v in self.memory.best(kind, 5)]
+        """记忆 top 条目（带 key 字段给面板展示）。
+
+        注意：MemoryStore 里存的是 {名字: {count, weight, ...}}，`best()` 只返回
+        值列表、丢了名字。旧写法 `for k, v in self.memory.best(...)` 是拿字典的
+        key 去解包 → 记忆一多就 ValueError: too many values to unpack，
+        整个 dashboard/get_panel_state 全崩（面板永远停在「加载中」）。
+        """
+        try:
+            store = self.memory.query(kind) or {}
+        except Exception:
+            return []
+        items = [{"key": k, **v} for k, v in store.items()
+                 if isinstance(v, dict) and not v.get("archived")
+                 and not str(k).startswith("route_")]
+        items.sort(key=lambda e: float(e.get("weight", 0) or 0), reverse=True)
+        return items[:5]
 
     async def memory_state(self) -> Dict[str, Any]:
         """记忆面板状态。"""
@@ -522,11 +584,15 @@ class PawpilotRuntime:
                                 self._last_pilot_handback = time.time()
                         else:
                             self.pilot.tick_dry(s)
-                        # 有驾驶行为（任务中或车速>0）才保留快照，供提议/闲聊/面板
-                        if s.sdk_active and (s.on_job or s.speed_kmh > 5):
+                        # 只要 SDK 活跃就保留快照：主菜单/未接管时清空（避免 0 值
+                        # 被当成真实读数），但在游戏里停车休息也应该能陪聊
+                        # （2026-10：旧条件要求"有任务或车速>5"，服务区歇脚就没人陪了）
+                        if s.sdk_active:
                             self._last_snap = s
                         else:
                             self._last_snap = None
+                        # 推送车道排空：优先级队列里攒下的话，车道空了就放一条出来
+                        await self.push.drain()
                         await asyncio.sleep(self.cfg.poll_interval_s)
                 except Exception:
                     r.close()
@@ -566,9 +632,15 @@ class PawpilotRuntime:
                 # 画面畅聊：OCR 采样（每 10 分钟一次）
                 if now - self._last_ocr_at >= self._ocr_interval:
                     self._last_ocr_at = now
-                    scene_topic = await self._ocr_scene_topic()
+                    photo_ask, scene_topic = await self._ocr_scan()
+                    if photo_ask:
+                        self._spawn(self.push.push_fact(
+                            self.emotion.custom_fact(photo_ask, "photo"),
+                            priority=CHAT))
+                        continue
                     if scene_topic:
-                        await self.push.push_direct(self.persona.polish(scene_topic))
+                        await self.push.push_direct(self.persona.polish(scene_topic),
+                                                    priority=CHAT)
                         continue
                 # ── 接力驾驶提议：开阔路段主动提出"我来开一段"（有动作，不是话）
                 if (getattr(self.cfg, "pilot_relay_enabled", True)
@@ -593,7 +665,8 @@ class PawpilotRuntime:
                         cooldown_s=float(getattr(self.cfg, "passing_cooldown_s", 1800.0) or 1800.0),
                     )
                     if place:
-                        await self.push.push_fact(self._passing_place_fact(place))
+                        await self.push.push_fact(self._passing_place_fact(place),
+                                                  priority=CHAT)
                         continue
                 # 猫娘电台（按时段/天气/驾驶时长挑节目；内容交宿主 LLM 演绎）
                 if getattr(self.cfg, "content_radio_dj", True):
@@ -605,17 +678,46 @@ class PawpilotRuntime:
                                             station_hint=getattr(self, "_radio_station_hint", ""),
                                             weather=weather)
                     if brief:
-                        await self.push.push_fact(brief)
+                        await self.push.push_fact(brief, priority=CHAT)
                         continue
-                # 地图路况叙事（道路匹配 + 市区/野外 + 弯道 + 服务设施）：5 分钟一次
-                # 走 respond（事实行交宿主 LLM 说话）——旧版是 blind 直出气泡，
-                # 猫娘"从没说过"，用户体感就等于地图数据没用上。
-                if self.map_kb.snapshot().get("loaded") and now - getattr(self, "_last_pos", 0) > 900:
-                    self._last_pos = now
-                    pos_line = self._world_position_line(snap)
-                    if pos_line:
+                # ── 陪玩维度引擎（主通道）──────────────────────────────
+                # 2026-10 主人定调"陪玩是方方面面的"：旧版把主动输出收得只剩安全
+                # 提醒，自由驾驶时更几乎全被门控挡掉，玩起来不像有人陪。
+                # 现在由十几个维度轮转（路况/进城/天气/夜路/这单货/行程/车况/
+                # 关心/巡航/晨昏/生活闲聊/反问/回忆/风景），每维独立冷却，
+                # 角度轮换避免车轱辘话；类别挂面板开关，频率乘面板倍率。
+                # 陪聊给事件让路：刚有真实内容（分段/收费站/加油站/事故…）出去过，
+                # 就先闭嘴，别把主人的注意力抢走（实测每分钟一条闲聊会盖住事件类）
+                quiet_s = float(getattr(self.cfg, "companion_event_quiet_s", 45.0) or 45.0)
+                if now - getattr(self, "_last_push_at", 0.0) < quiet_s:
+                    pass
+                else:
+                    gap_mul = BROADCAST_FREQUENCY_MULTIPLIERS.get(
+                        self.arbiter.broadcast_frequency, 1.0)
+                    cctx = self.companion.build_context(
+                        snap,
+                        drive_min=((now - self.proactive._drive_start_ts) / 60.0
+                                   if self.proactive._drive_start_ts else 0.0),
+                        place=self.places.nearest(snap.world_x, snap.world_z, max_km=8.0),
+                        odometer_km=snap.odometer_km,
+                        trips=int((self.profile.snapshot().get("stats") or {}).get("trips", 0) or 0),
+                        top_city=self._top_city_name(),
+                        rain_confirmed=(getattr(self, "_last_weather_hint", "") == "雨"),
+                        remark=self.recall.recent_remark(),
+                    )
+                    picked = self.companion.next_fact(
+                        snap, cctx, now=now,
+                        categories=self.arbiter.broadcast_categories,
+                        gap_multiplier=gap_mul)
+                    if picked:
+                        self.plugin.logger.info(
+                            "[陪玩] %s | %s", picked["id"],
+                            picked["fact"].splitlines()[0][:60])
+                        if picked["id"] == "remark":
+                            self.recall.mark_remark_spoken()
                         await self.push.push_fact(
-                            self.emotion.custom_fact(pos_line, "proactive"))
+                            self.emotion.custom_fact(picked["fact"], "proactive"),
+                            priority=CHAT)
                         continue
                 # L3 主动提议（服务区/加油/疲劳/夜间…）
                 # 放宽门控：只要在任务中且未暂停就允许。旧版限定
@@ -633,73 +735,115 @@ class PawpilotRuntime:
                         await self.push.push_fact(
                             self.emotion.custom_fact(sa_advice, "proactive"))
                         continue
-                # L4 随机闲聊（低频保底，仅驾驶中，按场景话题池）
-                if snap.on_job:
-                    scenario_key = self._scenario_talk_key(snap)
-                    topic = self.small_talk.random_topic(scenario_key, now)
-                    if topic and not self.cfg.dry_run:
-                        await self.push.push_fact(topic)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                # 别静默吞：这个循环一挂，陪玩就整个哑掉，而面板上看不出任何异常
+                self.plugin.logger.warning("[陪玩循环] 本轮异常: %s: %s",
+                                           type(exc).__name__, exc)
                 await asyncio.sleep(15.0)
 
     async def _ocr_scene_topic(self) -> Optional[str]:
-        """OCR 截屏识别 → 场景话题 + 等级检测。"""
+        """OCR 截屏识别 → 普通场景话题（美景不在这里处理，见 _ocr_scan）。"""
+        ask, topic = await self._ocr_scan()
+        return topic if not ask else None
+
+    async def _ocr_scan(self) -> tuple:
+        """一次截屏识别，返回 (美景拍照问句, 普通场景话题)。
+
+        2026-10 主人定调："识别到好风景要询问要不要拍照"——所以美景不再自动拍，
+        改成先问一句，主人答应（面板按钮或直接说"拍吧"）才真的拍。
+        """
         if self.hud_ocr is None:
             from ..adapters.hud_ocr import HudOcr
             self.hud_ocr = HudOcr(self.plugin)
             if not self.hud_ocr.is_available():
-                return None
+                return "", ""
         text = await asyncio.to_thread(self.hud_ocr.read_text)
         if not text:
-            return None
-        # 天气线索（OCR 里出现雨/雪/雾就记一笔）——供猫娘电台与路况叙事引用
+            self.plugin.logger.info("[OCR] 没读到文字（可用=%s 错误=%s）",
+                                    self.hud_ocr.is_available(),
+                                    (self.hud_ocr.snapshot() or {}).get("error", ""))
+            return "", ""
+        self.plugin.logger.info("[OCR] 读到 %d 字: %s",
+                                len(text), " ".join(text.split())[:120])
+        # 天气线索（OCR 里出现雨/雪/雾就记一笔）——供猫娘电台与路况叙述引用
         low = text.lower()
         for kw, label in (("rain", "雨"), ("雨", "雨"), ("snow", "雪"),
                           ("雪", "雪"), ("fog", "雾"), ("雾", "雾")):
             if kw in low:
                 self._last_weather_hint = label
                 break
-        # 等级检测：OCR 识别到数字等级 → 庆祝
+        # 等级检测：OCR 识别到数字等级 → 庆祝（这条是重要内容）
         level = self._extract_level(text)
         if level:
             celebrate = self.level_celebrate.update(level)
             if celebrate:
-                return celebrate
-        # 美景检测 → 拍照
+                return "", celebrate
+        # 美景检测 → 问她要不要拍一张（记住场景，主人答应时才拍）
         scene = self.photo_album.detect(text)
-        if scene:
-            record = await self.photo_album.shoot(scene, self.hud_ocr)
-            if record:
-                caption = f"📸 拍到{scene}的美景了喵！"
-                self._spawn(self.push.push_direct(self.persona.polish(caption)))
-                return caption
-        # 天气提醒（雨/雪）
+        if scene and self.photo_album.can_shoot():
+            self._pending_photo_scene = scene
+            self._pending_photo_until = time.time() + 300.0
+            return (f"[美景] 屏幕/画面里认出了「{scene}」这样的景色，"
+                    f"车主现在车速 {self._snap_speed_label()}。"
+                    f"请以猫娘语气问一句要不要拍一张留念"
+                    f"（提醒他可以直接说「拍吧」，面板上也有「📸 拍一张」）", "")
+        # 天气提醒（雨/雪）——事实行，走内容通道
         weather = self.proactive.weather_propose(text)
         if weather:
-            return weather
-        return self.scene_chat.topic_from_ocr(text)
+            return "", weather
+        return "", self.scene_chat.topic_from_ocr(text)
 
-    def _scenario_talk_key(self, snap) -> str:
-        """闲聊话题池选择：高速/市区/深夜/服务区/默认。"""
-        if snap is None:
-            return "default"
-        if snap.time_abs_min is not None and Proactive._is_night(snap.time_abs_min):
-            return "night"
-        sc = self.arbiter.scenario.current
-        if sc == "HIGHWAY":
-            return "highway"
-        if sc in ("URBAN", "DRIVING") and snap.speed_kmh < 50:
-            return "urban"
-        if snap.paused or snap.speed_kmh < 5:
-            return "service"
-        return "default"
+    def _snap_speed_label(self) -> str:
+        s = self._last_snap
+        return f"{s.speed_kmh:.0f} km/h" if s is not None else "未知"
+
+    async def take_photo(self, scene: str = "", auto: bool = False) -> Dict[str, Any]:
+        """拍一张：面板按钮 / 主人说"拍吧" / 她自己按场景拍。
+
+        `auto=False` 表示这是明确要求，跳过相册冷却。
+        """
+        if self.hud_ocr is None:
+            from ..adapters.hud_ocr import HudOcr
+            self.hud_ocr = HudOcr(self.plugin)
+        if not self.hud_ocr.is_available():
+            return {"ok": False, "summary": "现在抓不到画面喵（截屏组件不可用）"}
+        if not scene:
+            scene = self._pending_photo_scene or "scenery"
+        record = await self.photo_album.shoot(scene, self.hud_ocr,
+                                              force=not auto)
+        if not record:
+            return {"ok": False, "summary": "刚拍过一张喵，过十分钟再拍~"}
+        self._pending_photo_scene = ""
+        self.recall.on_relationship("last_photo", {"value": scene}, importance=0.3)
+        await self.push.push_fact(
+            self.emotion.custom_fact(
+                f"[拍照] 已经把刚才的画面存进相册（场景：{scene}）。"
+                "请以猫娘语气说一句「拍好了」，提一句这个画面值得留着", "photo"),
+            priority=IMPORTANT)
+        return {"ok": True,
+                "summary": f"📸 拍好了（{scene}）——面板「地图 → 美景相册」里能看到"}
+
+    def _top_city_name(self) -> str:
+        """跑得最多的城市（陪玩回忆维度用）。"""
+        try:
+            top = self._top_entries("cities")
+            if top:
+                return str(top[0].get("key", "") or "")
+        except Exception:
+            pass
+        return ""
 
     # ── 内容层：地点文化 / 开场故事 / 途经播报（事实行交宿主 LLM 演绎）──
 
     def _opening_story_fact(self, snap, hints: Optional[list] = None) -> str:
-        """每单开场：把这一单的客观信息 + 起点地域特色要求交给宿主 LLM。"""
+        """每单开场：把这一单的客观信息 + 起点地域特色要求交给宿主 LLM。
+
+        2026-10 主人补需求："开始任务的里程剩余里程什么的播报"——所以这里除了
+        起点/终点/货物，还要带上全程里程、出发时剩余里程、预计到达时间，
+        以及"这箱油够不够跑完全程"（和加油判断同一套判据）。
+        """
         km = snap.planned_distance_km
         eta = km / 65.0 if km else 0.0
         hour = (snap.time_abs_min // 60) % 24 if snap.time_abs_min else -1
@@ -714,6 +858,18 @@ class PawpilotRuntime:
                 f"货物 {snap.cargo or '普通货'}", f"全程约 {km} km"]
         if eta:
             bits.append(f"预计 {eta:.1f} 小时")
+        remain = float(getattr(snap, "route_remaining_km", 0) or 0)
+        if remain:
+            bits.append(f"出发时导航剩余 {remain:.0f} km")
+        if snap.time_abs_min and eta:
+            arr = int(snap.time_abs_min + eta * 60) % 1440
+            bits.append(f"按当前时段推算约 {arr // 60:02d}:{arr % 60:02d} 到达")
+        # 一路的油够不够：和 fuel_advice 同一判据（续航 vs 全程）
+        rng = float(getattr(snap, "fuel_range_km", 0) or 0)
+        if rng and km:
+            bits.append("这箱油够跑完全程，不用专门找加油站"
+                        if rng >= km * 1.1 else
+                        f"续航只有 {rng:.0f} km，跑不完全程，中途必须加油")
         if when:
             bits.append(when)
         if snap.is_city:
@@ -723,7 +879,8 @@ class PawpilotRuntime:
             mem = "、".join(str(h) for h in hints[:2])
         fact = ("[行程开场] " + "；".join(bits) + "。"
                 "请以猫娘语气开个场：一句介绍起点的地域特色/文化（可以讲当地风物、"
-                "路况习惯），一句说这趟的打算。不要念参数，像副驾随口聊。")
+                "路况习惯），一句说这趟的打算（顺带把里程/预计时间说清楚）。"
+                "不要念参数，像副驾随口聊。")
         if mem:
             fact += f"（可顺带提起：{mem}）"
         return fact
@@ -748,44 +905,6 @@ class PawpilotRuntime:
         tail = "、我们以前来过这里" if visits > 1 else ""
         return (f"[途经] 正经过 {name} 附近（约 {dist:.1f} km）{tail}。"
                 f"请以猫娘语气随口说一句这个地方的特点或风物（一句话，别念参数）")
-
-    def _world_position_line(self, snap) -> Optional[str]:
-        """地图路况叙事：真实道路匹配 + 市区/野外 + 前方弯道 + 最近设施。
-
-        2026-10 实测校准过两件事，所以这里不再"只靠限速猜"：
-        1) 遥测坐标与地图 KB 同坐标系（行驶中最近道路端点仅 11 米）
-        2) `common_f.scale` 直接给出地图比例尺：3=市区(1:3)、19=野外(1:19)
-        """
-        if not snap or (snap.world_x == 0 and snap.world_z == 0):
-            return None
-        # 道路等级（限速推断）与地图实测互证
-        road = self.map_kb.road_level(snap.speed_limit_kmh)
-        nr = self.map_kb.nearest_road(snap.world_x, snap.world_z, max_km=1.0)
-        area = "市区" if snap.is_city else ("郊外/高速" if snap.is_open_road else "")
-        label = road or area or "路上"
-        parts = [f"现在在{label}上喵"]
-        if area and road:
-            parts.append(f"（{area}路段）")
-        if nr:
-            if nr["distance_km"] <= 0.05:
-                parts.append("压在主路上")
-            elif nr["distance_km"] <= 0.5:
-                parts.append(f"离主路约 {nr['distance_km'] * 1000:.0f} 米")
-        # 前方弯道（只报"有弯道+大致角度"，不报左右：车头朝向约定未标定）
-        try:
-            curve = self.map_kb.curve_ahead(snap.world_x, snap.world_z)
-        except Exception:
-            curve = None
-        if curve:
-            parts.append(f"前方约 350 米有急弯（约 {curve * 57.3:.0f}°），提前减速")
-        # 最近服务设施（3 km 内才提）
-        fuel = self.map_kb.nearest_facility(snap.world_x, snap.world_z, "fuel", max_km=3.0)
-        svc = self.map_kb.nearest_facility(snap.world_x, snap.world_z, "service", max_km=3.0)
-        if snap.fuel_percent < 45 and fuel:
-            parts.append(f"前方 {fuel['distance_km']:.1f} km 有加油站")
-        elif svc:
-            parts.append(f"前方 {svc['distance_km']:.1f} km 有服务区")
-        return "，".join(parts) + "~"
 
     @staticmethod
     def _extract_level(text: str) -> Optional[int]:
@@ -843,19 +962,17 @@ class PawpilotRuntime:
                 "crash",
                 parts=parts or "无明显损伤",
                 speed=float(ev.data.get("speed_kmh", snap.speed_kmh)),
-            )))
+            ), priority=CRITICAL))
             if crash_hint:
                 self._spawn(self.push.push_fact(
-                    self.emotion.custom_fact(crash_hint, "crash")))
+                    self.emotion.custom_fact(crash_hint, "crash"),
+                    priority=CRITICAL))
             self._spawn(self._crash_chain(ev))
             return
         if ev.name == "job_delivered" and ev.snapshot:
             self._spawn(self._finish_trip(ev))  # 内部含归档，避免统计竞态
-            line = self.catgirl.existence_line("job_delivered")
-            if line:
-                self._spawn(self.push.push_direct(
-                    self.persona.polish(line)))
-            # 地点簿学习：到达时的坐标就是目的城市的位置
+            # 到货只发一条：结算数据行（交宿主 LLM 收尾）。
+            # 旧版还额外盲推一句写死的"到站检查"话术，和总结叠在一起像复读。
             snap_d = ev.snapshot
             if snap_d.city_dst:
                 self.places.learn(snap_d.city_dst, snap_d.world_x, snap_d.world_z, "city")
@@ -907,12 +1024,27 @@ class PawpilotRuntime:
                 f"（当前海拔 {alt:.0f} 米）。请以猫娘语气提醒一句山路驾驶"
                 f"（连续弯道/长下坡用发动机制动等），1 句即可"))
             return
+        # ── 内容类事件：不走仲裁，直接 respond ──────────────────────
+        # 这些都是一次性/长间隔的真实内容（行程分段、距离锚点、交付时间、
+        # 收费站、挂车），旧版和普通事件一样过仲裁 → 常被"场景门控"或
+        # "限流单槽窗口"吞掉。实测主人反馈："任务分段播报、时间提醒从没响过"。
+        # 它们本身频率极低（一次任务 3~4 条），直接放行不会刷屏。
+        if ev.name in CONTENT_EVENTS:
+            prompt = self._render(ev)
+            if prompt:
+                self._spawn(self.push.push_fact(prompt))
+            return
         allowed, reason = self.arbiter.decide(ev.name, ev.snapshot)
         if not allowed:
+            # 留痕：面板决策日志现在也是滚动历史，这里再记一条便于对账
+            self.plugin.logger.info("[事件·抑制] %s ← %s", ev.name, reason)
             return
         prompt = self._render(ev)
         if prompt:
-            self._spawn(self.push.push_fact(prompt))
+            prio = CRITICAL if ev.name in CRITICAL_EVENTS else IMPORTANT
+            if ev.name == "air_pressure_low" and ev.data.get("emergency"):
+                prio = CRITICAL          # 紧急气压报警按事故级处理
+            self._spawn(self.push.push_fact(prompt, priority=prio))
 
     def _reset_trip_stats(self) -> None:
         self._job_crashes = 0
@@ -1059,14 +1191,15 @@ class PawpilotRuntime:
             "refuels": snap_stats["refuels"],
             "fuel_avg": round(fuel_avg, 1),
         }
-        summary = self.trip_summary.build(trip)
-        lines.append(self.persona.polish(summary))
-        # 新纪录/连续无事故庆祝
+        summary = self.trip_summary.build_fact(trip)
+        lines.append(summary)
+        # 新纪录/连续无事故庆祝（同样只给事实，不写死台词）
         profile_result = self.profile.record(trip)
         celebration = self.profile.record_celebration(profile_result)
         if celebration:
-            lines.append(self.persona.polish(celebration))
-        await self.push.push_fact("\n".join(lines))
+            lines.append(celebration)
+        await self.push.push_fact(
+            self.emotion.custom_fact("\n".join(lines), "job_delivered"))
 
     def _render(self, ev: TruckEvent) -> Optional[str]:
         s = ev.snapshot
@@ -1138,6 +1271,24 @@ class PawpilotRuntime:
                 percent=ev.data.get("percent", 0.0),
                 parts=ev.data.get("parts", ""),
             )
+        if ev.name == "brake_temp_high":
+            return self.emotion.fact_prompt(
+                ev.name, temp=ev.data.get("temp", 0.0),
+                retarder_hint=("（缓速器开着能帮上忙）" if ev.data.get("retarder")
+                               else "（长下坡记得用缓速器/发动机制动）"))
+        if ev.name == "air_pressure_low":
+            return self.emotion.fact_prompt(
+                ev.name, bar=ev.data.get("bar", 0.0),
+                emergency_hint=("是紧急气压报警，必须马上靠边停车"
+                                if ev.data.get("emergency") else "刹车会变软"))
+        # 机务/操作类：参数直接来自遥测
+        if ev.name in ("adblue_low", "battery_low",
+                       "lights_off_night", "park_brake_moving", "wheels_airborne",
+                       "engine_stalled", "high_beam_on", "blinker_forgotten",
+                       "engine_warning", "overheat"):
+            kw = dict(ev.data)
+            kw.setdefault("speed", s.speed_kmh)
+            return self.emotion.fact_prompt(ev.name, **kw)
         return None
 
     def _greeting(self) -> str:
@@ -1202,6 +1353,16 @@ class PawpilotRuntime:
 
     async def handle_player_talk(self, text: str) -> Dict[str, Any]:
         self.arbiter.on_player_speak()
+        # 陪玩关键：主人说过的话要记住，之后她会自己主动提起
+        try:
+            self.recall.on_player_remark(text)
+            self._spawn(self.memory.save())
+        except Exception as exc:            # noqa: BLE001
+            self.plugin.logger.warning("记住主人这句话失败: %s", exc)
+        # "拍吧" —— 她问了要不要拍照，主人答应了（口语/面板按钮两条路都通）
+        if any(k in text for k in ("拍照", "拍一张", "拍吧", "拍下来", "照一张",
+                                   "来一张", "截图", "留个纪念")):
+            return await self.take_photo()
         r = TelemetryReader()
         if not r.open():
             return {"ok": True,

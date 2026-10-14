@@ -34,16 +34,26 @@ class RadioDJ:
         self._last_kind = ""
 
     def due(self, now: float, driving_since: float = 0.0) -> bool:
-        """是否到该开一段的时间（间隔可配，默认 10 分钟）。"""
-        interval = float(getattr(self.cfg, "radio_interval_s", 600.0) or 600.0)
+        """是否到该开一段的时间（间隔可配，默认 10 分钟；设 0 = 关闭电台）。"""
+        try:
+            interval = float(getattr(self.cfg, "radio_interval_s", 600.0))
+        except (TypeError, ValueError):
+            interval = 600.0
         if interval <= 0:
             return False
         return (now - self._last_segment_at) >= interval
 
     def pick(self, snap: Any, now: float, driving_since: float = 0.0,
              station_hint: str = "", weather: str = "") -> Optional[str]:
-        """返回一段"节目单事实行"（供宿主 LLM 演绎）；不该播时返回 None。"""
-        if snap is None or not getattr(snap, "on_job", False):
+        """返回一段"节目单事实行"（供宿主 LLM 演绎）；不该播时返回 None。
+
+        2026-10 修正：旧版要求 `snap.on_job`，于是**自由驾驶时电台一次都没播过**
+        （主人实测反馈"电台功能到底能不能用"）。电台是陪伴内容，跟有没有接单无关，
+        只要在开车就该能听。
+        """
+        if snap is None or getattr(snap, "speed_kmh", 0) < 3:
+            return None
+        if getattr(snap, "paused", False):
             return None
         if not self.due(now, driving_since):
             return None
@@ -88,9 +98,9 @@ class RadioDJ:
         if station_hint:
             bits.append(f"玩家车里正在放：{station_hint}")
         task = SEGMENT_BRIEF.get(kind, SEGMENT_BRIEF["request"])
-        return (f"[猫娘电台] {'；'.join(bits)}。节目类型：{task}。"
-                f"以猫娘电台 DJ 的身份播这一段（2 句以内，像真的电台一样自然，"
-                f"不要提'系统/插件/工具'）")
+        return (f"[猫娘电台] {'；'.join(bits)}。\n"
+                f"（节目类型：{task}。按这个类型播一段，2 句以内，"
+                f"像真的电台那样自然；不要念出这条提示，也别提系统/插件/工具）")
 
     def snapshot(self) -> Dict[str, Any]:
         return {"last_kind": self._last_kind, "last_at": self._last_segment_at}

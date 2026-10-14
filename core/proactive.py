@@ -18,27 +18,36 @@ class Proactive:
         self._last_station_id: Optional[str] = None
 
     def update(self, snap) -> None:
-        """跟踪连续驾驶时长（仅非任务/暂停/长停时重置）。"""
-        if snap.on_job and snap.speed_kmh > 5 and not snap.paused:
+        """跟踪连续驾驶时长（只要在开车就算，等红灯不清零、不要求接单）。"""
+        if snap.speed_kmh > 5 and not snap.paused:
             if self._drive_start_ts is None:
                 self._drive_start_ts = time.time()
         else:
-            # 等红灯/堵车单帧减速不清零；仅脱离任务或暂停时重置
-            if (not snap.on_job or snap.paused) and self._drive_start_ts is not None:
+            # 等红灯/堵车单帧减速不清零；真停下或暂停才重置
+            if snap.paused and self._drive_start_ts is not None:
                 self._drive_start_ts = None
         self._last_drive_snap = snap
 
     def propose(self, now: float | None = None) -> Optional[str]:
-        """返回一条建议；无建议返回 None。"""
+        """返回一条建议；无建议返回 None。
+
+        2026-10 二次修正：旧版开头 `if not snap.on_job: return None`，
+        自由驾驶时整段主动提议（加油/休息/夜间/长驾驶）全部失效。
+        现在只要在开车就参与，只有"赶时间"这种任务专属项才要求接单。
+        """
         now = now or time.time()
         snap = self._last_drive_snap
-        if snap is None or not snap.on_job:
+        if snap is None or snap.paused or snap.speed_kmh < 3:
             return None
-        # 加油站/服务区接近（按油量/剩余里程需要）
+        # ① 先做"能不能跑到目的地"的续航判断（比单纯看油量百分比有意义）
+        advice = self.fuel_advice(snap, now)
+        if advice:
+            return advice
+        # ② 加油站/服务区接近（按油量/剩余里程需要）
         station = self.station_propose(snap, now)
         if station:
             return station
-        # 低油量（每 10 分钟一次，阈值读配置）
+        # ③ 没有任务或续航未知时，退回"油量百分比偏低"的兜底提醒
         fuel_pct = float(getattr(self.cfg, "low_fuel_percent", 15))
         if snap.fuel_percent < fuel_pct and now - self._last_propose.get("fuel", 0) > 600:
             self._last_propose["fuel"] = now
@@ -66,6 +75,58 @@ class Proactive:
             return "赶时间也别超速喵，稳一点更划算~"
         return None
 
+    def fuel_advice(self, snap, now: float | None = None) -> Optional[str]:
+        """按「当前续航 vs 到目的地还剩多少」给出要不要加油的建议。
+
+        这才是玩家真正关心的判断：油量 40% 但目的地就在 30 km 外不用停；
+        油量 55% 而还剩 900 km 就必须马上补。三档：
+          ratio < 1.0          跑不到 → 必须加，报差多少 + 最近加油站在哪
+          1.0 ≤ ratio < 1.25   刚好够 → 建议顺路补一点
+          ratio ≥ 1.25         够跑   → 不打扰（除非油量真的见底）
+        返回的是**事实行**（措辞交给宿主 LLM），不是硬编码台词。
+        """
+        remaining = float(getattr(snap, "route_remaining_km", 0) or 0)
+        rng = float(getattr(snap, "fuel_range_km", 0) or 0)
+        if remaining <= 0 or rng <= 0:
+            return None
+        now = now or time.time()
+        ratio = rng / remaining
+        # 已经在附近找到加油站也要能报出来（跑不到时把搜索半径放宽）
+        short_km = max(0.0, remaining - rng)
+        search_km = 30.0 if ratio < 1.0 else 8.0
+        fac = None
+        if self.map_kb is not None:
+            try:
+                fac = self.map_kb.nearest_facility(snap.world_x, snap.world_z,
+                                                   "fuel", max_km=search_km)
+            except Exception:               # noqa: BLE001
+                fac = None
+        where = ""
+        if fac:
+            where = f"；最近的加油站在 {fac.get('distance_km', 0):.1f} km 外"
+
+        if ratio < 1.0:
+            key, cd = "fuel_must", 300.0
+        elif ratio < 1.25:
+            key, cd = "fuel_tight", 900.0
+        elif snap.fuel_percent < float(getattr(self.cfg, "low_fuel_percent", 15)):
+            key, cd = "fuel_low", 900.0
+        else:
+            return None
+        if now - self._last_propose.get(key, 0) < cd:
+            return None
+        self._last_propose[key] = now
+
+        base = (f"剩余续航 {rng:.0f} km、到目的地还有 {remaining:.0f} km"
+                f"（油量 {snap.fuel_percent:.0f}%）")
+        if key == "fuel_must":
+            return (f"[加油判断] {base}，差 {short_km:.0f} km 跑不到{where}。"
+                    "必须顺路加油，别硬撑。")
+        if key == "fuel_tight":
+            return f"[加油判断] {base}，刚好够到{where}；顺路补一点更稳。"
+        return (f"[加油判断] {base}，够跑但油量已经很低{where}，"
+                "建议找机会补满。")
+
     def station_propose(self, snap, now: float | None = None) -> Optional[str]:
         """接近加油站/服务区：按需提醒（油量低→加油，长途→休息）。
 
@@ -73,8 +134,11 @@ class Proactive:
         实测当前位置 3km 内 9 个加油站、服务区最近 0.11km——原半径
         1.5/2.0km 太窄，多数时候擦肩而过不触发。改为 3km / 4km，
         冷却 8 分钟 → 4 分钟。离开搜索半径后重置可重新提醒。
+
+        2026-10 二次修正：旧版要求 `snap.on_job`，主人自由驾驶时加油站/服务区
+        提醒整段失效（实测反馈"加油站服务区距离也不播报"）→ 只要在开车就提醒。
         """
-        if self.map_kb is None or not snap.on_job:
+        if self.map_kb is None or snap.speed_kmh < 3:
             return None
         now = now or time.time()
         # 油量低 → 找加油站；否则长途 → 找服务区

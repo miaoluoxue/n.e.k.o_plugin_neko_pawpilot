@@ -31,9 +31,9 @@ class SceneChat:
         self._last_text = ""
 
     def topic_from_ocr(self, ocr_text: str, now: float | None = None) -> Optional[str]:
-        """OCR 文本 → 场景话题；10 分钟冷却避免刷屏。"""
+        """OCR 文本 → 场景话题；5 分钟冷却避免刷屏（识屏每 4 分钟扫一次）。"""
         now = now or time.time()
-        if not ocr_text or now - self._last_topic < 600:
+        if not ocr_text or now - self._last_topic < 300:
             return None
         text = ocr_text.lower()
         # 文本变化才可能触发新话题
