@@ -11,6 +11,7 @@ from ..adapters.push_sender import CHAT, CRITICAL, IMPORTANT, PushSender
 from ..adapters.telemetry_client import TelemetryReader
 from ..adapters.telemetry_installer import TelemetryInstaller
 from .arbiter import Arbiter
+from .cargo import CargoBook
 from .companion import Companion
 from .config_model import PawpilotConfig
 from .diary import TripDiary
@@ -25,6 +26,7 @@ from .mood import Persona
 from .photo_album import PhotoAlbum
 from .pilot import CatPilot
 from .places import PlaceBook
+from .playstyle import PlaystyleBook
 from .proactive import Proactive
 from .profile import DriverProfile
 from .radio import RadioDJ
@@ -32,7 +34,7 @@ from .recall import Recall
 from .route_planner import RoutePlanner
 from .safety_guard import SafetyGuard
 from .scene_chat import SceneChat
-from .templates import EmotionRenderer
+from .templates import EmotionRenderer, offence_note
 from .trip_summary import TripSummary
 
 ACTIVITY_TITLES = {
@@ -117,6 +119,10 @@ class PawpilotRuntime:
         self.memory = MemoryStore(plugin.store, mirror_path=_memory_mirror_path(plugin))
         # 旅途日记（故事层）：收车小结 / 回归问候 / 陪聊回忆 共用
         self.diary = TripDiary(self.memory)
+        # 玩法层：货物分类 + 玩法画像（只吃真实遥测字段，不编造游戏里没有的概念）
+        self.cargo_book = CargoBook()
+        self.playbook = PlaystyleBook(self.cargo_book)
+        self._playstyle = None
         self.recall = Recall(self.memory)
         self.ledger = Ledger(self.memory)
         self.trip_summary = TripSummary({})
@@ -471,6 +477,8 @@ class PawpilotRuntime:
             },
             "memory": self.memory.snapshot(),
             "diary": self.diary.snapshot(top=5),
+            "playstyle": (self.playbook.describe(s) if s is not None
+                          else self.playbook.describe(None)),
             "top_cities": self._top_entries("cities"),
             "top_cargos": self._top_entries("cargos"),
             "scenario": arb.get("scenario", "IDLE"),
@@ -726,8 +734,12 @@ class PawpilotRuntime:
                 if now - getattr(self, "_last_push_at", 0.0) < quiet_s:
                     pass
                 else:
-                    gap_mul = BROADCAST_FREQUENCY_MULTIPLIERS.get(
+                    # 玩法决定陪玩密度：市区配送/重载/赶时间更安静，观光/兜风更热闹
+                    st = self.playbook.classify(snap)
+                    self._playstyle = st
+                    gap_mul = (BROADCAST_FREQUENCY_MULTIPLIERS.get(
                         self.arbiter.broadcast_frequency, 1.0)
+                        * float(getattr(st, "gap_mult", 1.0) or 1.0))
                     cctx = self.companion.build_context(
                         snap,
                         drive_min=((now - self.proactive._drive_start_ts) / 60.0
@@ -745,8 +757,17 @@ class PawpilotRuntime:
                         driving_by=("catgirl" if self.pilot.state == "engaged" else "user"),
                     )
                     cctx["milestone_km"] = self._milestone_km
+                    fam = self.cargo_book.classify(getattr(snap, "cargo_id", ""),
+                                                   getattr(snap, "cargo", ""))
+                    cctx["play_label"] = st.label
+                    cctx["play_advice"] = self.cargo_book.tip(
+                        getattr(snap, "cargo_id", ""), getattr(snap, "cargo", ""))
+                    cctx["cargo_family"] = (fam or {}).get("label", "")
                     bias = (self._chat_bias
                             if now < getattr(self, "_chat_bias_until", 0.0) else "")
+                    if not bias:
+                        # 没有刚发生的事时，按玩法倾向选话题（观光→风景、市区→进城…）
+                        bias = st.chat_bias
                     picked = self.companion.next_fact(
                         snap, cctx, now=now,
                         categories=self.arbiter.broadcast_categories,
@@ -902,6 +923,12 @@ class PawpilotRuntime:
             when = "傍晚出发"
         bits = [f"起点 {snap.city_src or '未知'}", f"终点 {snap.city_dst or '未知'}",
                 f"货物 {snap.cargo or '普通货'}", f"全程约 {km} km"]
+        # 货物家族（用游戏真实 cargo_id/显示名判断，认不出就不说）
+        fam_label, fam_tip = self.cargo_book.describe(
+            getattr(snap, "cargo_id", ""), getattr(snap, "cargo", ""),
+            float(getattr(snap, "cargo_mass", 0) or 0) / 1000.0)
+        if fam_label:
+            bits.append(f"货物类型：{fam_label}")
         if eta:
             bits.append(f"预计 {eta:.1f} 小时")
         remain = float(getattr(snap, "route_remaining_km", 0) or 0)
@@ -929,6 +956,8 @@ class PawpilotRuntime:
                 "不要念参数，像副驾随口聊。")
         if mem:
             fact += f"（可顺带提起：{mem}）"
+        if fam_tip:
+            fact += f"（这趟的驾驶要点，用一句话自然带出来：{fam_tip}）"
         return fact
 
     def _arrival_culture_fact(self, snap) -> str:
@@ -1293,7 +1322,12 @@ class PawpilotRuntime:
         if ev.name == "job_cancelled":
             return self.emotion.fact_prompt(ev.name, penalty=ev.data.get("penalty", 0))
         if ev.name == "fine":
-            return self.emotion.fact_prompt(ev.name, amount=s.fine_amount, offence=s.fine_offence or "违规")
+            offence = s.fine_offence or "违规"
+            note = offence_note(offence)
+            fact = self.emotion.fact_prompt(ev.name, amount=s.fine_amount, offence=offence)
+            if note:
+                fact += f"（对应规则：{note}）"
+            return fact
         if ev.name == "tollgate":
             return self.emotion.fact_prompt(ev.name, amount=ev.data.get("amount", s.tollgate_amount))
         if ev.name == "refuel":

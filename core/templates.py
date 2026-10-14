@@ -95,6 +95,29 @@ REPLY_CONTRACT = ("（上面这条是车载播报，不要逐字念出来：用�
                   "本行括号里的提示同样不要念出来）")
 
 
+# 罚单类型 → 一句对应的真实规则提示
+# 键按 SCS 遥测 gameplay.fineOffence 的真实取值做关键词匹配；
+# 认不出来时**不编造**，直接把游戏给的原文透出去。
+OFFENCE_NOTES = {
+    "speed": "超速罚单，限速牌不是装饰",
+    "red": "闯红灯，路口一定要提前减速",
+    "wrong": "逆行很危险，导航看错了就靠边重新看",
+    "light": "夜间没开灯，记得开大灯",
+    "sleep": "疲劳驾驶也会被罚，该休息就休息",
+    "fatigue": "疲劳驾驶也会被罚，该休息就休息",
+    "trailer": "挂车相关违规，检查一下挂车连接和灯光",
+    "toll": "收费站相关违规，别跟车太紧冲杆",
+}
+
+
+def offence_note(offence: str) -> str:
+    low = str(offence or "").lower()
+    for key, note in OFFENCE_NOTES.items():
+        if key in low:
+            return note
+    return ""
+
+
 def compose_fact(fact: str, style: str = "") -> str:
     """事实行 + 口吻说明，交给宿主 LLM 演绎（respond 通道统一入口）。"""
     note = REPLY_CONTRACT

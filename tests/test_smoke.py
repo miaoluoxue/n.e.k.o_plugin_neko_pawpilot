@@ -506,22 +506,30 @@ def test_memory_local_mirror_fallback():
 
 def test_opening_story_includes_mileage_and_fuel():
     """开场播报必须带里程/剩余里程/预计到达 + 这箱油够不够跑完。"""
+    from plugin.plugins.neko_pawpilot.core.cargo import CargoBook
     from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    class _Stub:
+        cargo_book = CargoBook()
 
     snap = TruckSnapshot()
     snap.city_src, snap.city_dst, snap.cargo = "Berlin", "Torino", "废金属"
+    snap.cargo_id = "scrap_metals"
+    snap.cargo_mass = 18_000.0
     snap.planned_distance_km = 480
     snap.route_distance_km = 400_000.0     # 出发时导航剩余 400 km
     snap.fuel = 700.0
     snap.fuel_capacity = 1000.0
     snap.fuel_range_km = 300.0             # 续航不够
     snap.time_abs_min = 8 * 60
-    fact = PawpilotRuntime._opening_story_fact(object(), snap)
+    fact = PawpilotRuntime._opening_story_fact(_Stub(), snap)
     assert "480" in fact and "400" in fact
     assert "预计 7.4 小时" in fact
     assert "加油" in fact and "跑不完全程" in fact
+    assert "货物类型：散货" in fact          # 真实 cargo_id → 家族
+    assert "坡道起步" in fact               # 对应的真实驾驶要点也带上了
     snap.fuel_range_km = 900.0
-    fact2 = PawpilotRuntime._opening_story_fact(object(), snap)
+    fact2 = PawpilotRuntime._opening_story_fact(_Stub(), snap)
     assert "够跑完全程" in fact2
 
 
@@ -679,6 +687,71 @@ def test_chatter_knows_who_is_driving():
         if got2:
             break
     assert got2 and "方向盘在你" in (got2.get("hint") or "")
+
+
+def test_cargo_family_and_playstyle():
+    """玩法适配：货物家族与玩法画像都只吃真实遥测字段，认不出就不编。"""
+    from plugin.plugins.neko_pawpilot.core.cargo import CargoBook
+    from plugin.plugins.neko_pawpilot.core.playstyle import PlaystyleBook
+    from plugin.plugins.neko_pawpilot.core.templates import offence_note
+
+    cb = CargoBook()
+    # 用游戏真实 cargo_id 判定（英文 id 稳定，中文显示名只作兜底）
+    cases = {
+        "wind_turbine_blades": "重载/超限",
+        "medical_vaccines": "冷链",
+        "explosives": "危险品",
+        "glass": "易碎",
+        "livestock": "活畜",
+        "gravel": "散货",
+        "scrap_metals": "散货",
+        "cement": "散货",
+    }
+    for cid, label in cases.items():
+        hit = cb.classify(cid, "")
+        assert hit and hit["label"] == label, (cid, hit)
+    # 认不出来的货物不乱猜
+    assert cb.classify("carbon_fiber_xyz", "碳纤维") is None
+    assert cb.tip("carbon_fiber_xyz", "") == ""
+    # 重载判定：重量也能触发（普通货 + 30 t）
+    desc, tip = cb.describe("carbon_fiber_xyz", "", 30.0)
+    assert "重载" in desc and "缓速器" in tip
+
+    pb = PlaystyleBook(cb)
+
+    def snap(**kw):
+        s = TruckSnapshot()
+        s.sdk_active = True
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    # 市区配送：最安静的一档
+    city = pb.classify(snap(on_job=True, speed_mps=40 / 3.6, map_scale=3.0,
+                            cargo_id="scrap_metals", time_abs_min=10 * 60))
+    assert city.key == "city_delivery" and city.gap_mult < 1.0
+    # 重载/超限：技术提醒优先
+    heavy = pb.classify(snap(on_job=True, speed_mps=50 / 3.6,
+                             cargo_id="wind_turbine_blades", cargo_mass=42000,
+                             map_scale=19.0, time_abs_min=10 * 60))
+    assert heavy.key == "heavy_haul" and heavy.chat_bias == "truck"
+    # 观光：更热闹
+    scenic = pb.classify(snap(on_job=False, speed_mps=70 / 3.6,
+                              map_scale=19.0, time_abs_min=13 * 60))
+    assert scenic.gap_mult > 1.0
+    # 夜班
+    night = pb.classify(snap(on_job=True, speed_mps=70 / 3.6, cargo="普通货",
+                             cargo_mass=8000, map_scale=19.0, time_abs_min=23 * 60))
+    assert night.key == "night_shift"
+    # 到货收尾（停着）
+    stop = pb.classify(snap(on_job=True, speed_mps=0.0, cargo="普通货",
+                            cargo_mass=8000, map_scale=3.0, time_abs_min=14 * 60))
+    assert stop.key == "delivery"
+
+    # 罚单类型：认识的给规则提示，不认识的透传原文、不编
+    assert "限速牌" in offence_note("Speeding")
+    assert "红灯" in offence_note("red light")
+    assert offence_note("something unknown") == ""
 
 
 def test_fuel_advice_by_range():

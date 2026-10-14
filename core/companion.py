@@ -250,6 +250,23 @@ def f_remark(snap, ctx) -> str:
     return "；".join(bits)
 
 
+def f_job_play(snap, ctx) -> str:
+    """这趟是什么玩法、该怎么开（全部来自真实遥测 + 游戏机制）。"""
+    bits = []
+    if ctx.get("play_label"):
+        bits.append(f"这趟的玩法是「{ctx['play_label']}」")
+    fam = ctx.get("cargo_family") or ""
+    if fam:
+        bits.append(f"货物属于{fam}")
+    if snap.cargo_mass:
+        bits.append(f"货重约 {snap.cargo_mass / 1000:.1f} t")
+    if snap.on_job and snap.city_dst:
+        bits.append(f"{snap.city_src or '起点'} → {snap.city_dst}")
+    if ctx.get("play_advice"):
+        bits.append(f"对应驾驶要点：{ctx['play_advice']}")
+    return "；".join(bits)
+
+
 def f_milestone(snap, ctx) -> str:
     """里程里程碑（原 SmallTalk 的唯一在用功能，2026-10 并入陪玩维度表）。"""
     bits = [f"总里程刚越过 {ctx.get('milestone_km', 0):.0f} km 这个整数关口"]
@@ -426,6 +443,15 @@ DIMENSIONS: Tuple[Dimension, ...] = (
         f_banter,
     ),
     Dimension(
+        "job_play", "这趟怎么开", "task", 900, 6,
+        ("按这个玩法提醒一句最要紧的技术要点（用驾驶建议那条）",
+         "说说这趟和普通单子比难在哪",
+         "顺带夸一句他这趟开得如何（结合玩法难度）",
+         "提一句这种货最容易在哪掉链子"),
+        lambda s, c: bool(c.get("play_label")) and bool(c.get("play_advice")),
+        f_job_play,
+    ),
+    Dimension(
         "milestone", "里程碑", "chatter", 600, 6,
         ("为这个关口高兴一下，顺带说说跑了多久",
          "纪念一下这个数字，提一句你们一起跑过的路",
@@ -523,6 +549,9 @@ class Companion:
             "diary_today": dict(diary_today or {}),
             "diary_last": dict(diary_last or {}),
             "driving_by": str(driving_by or ""),
+            "play_label": "",
+            "play_advice": "",
+            "cargo_family": "",
         }
         if getattr(snap, "time_abs_min", 0):
             h = (snap.time_abs_min // 60) % 24

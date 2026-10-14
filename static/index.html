@@ -201,6 +201,8 @@ body::before {
       <div class="row"><span class="k">情绪</span><span class="v" id="mood">-</span></div>
       <div class="row"><span class="k">猫娘</span><span class="v" id="mode">-</span></div>
       <div class="row"><span class="k">驾驶场景</span><span class="v" id="scenario">-</span></div>
+      <div class="row"><span class="k">本轮玩法</span><span class="v" id="playLabel">-</span></div>
+      <div class="row"><span class="k">货物类型</span><span class="v" id="cargoFamily">-</span></div>
       <div class="row"><span class="k">播报</span><span class="v" id="broadcast">-</span></div>
     </div>
     <div class="btn-group">
@@ -415,6 +417,11 @@ function renderDrive() {
   document.getElementById('mood').textContent = MOOD_LABELS[s.mood] || s.mood || '-';
   document.getElementById('mode').textContent = (s.catgirl || {}).name || '-';
   document.getElementById('scenario').textContent = SCENARIO_LABELS[s.scenario] || s.scenario || '-';
+  var ps = s.playstyle || {};
+  var pl = document.getElementById('playLabel');
+  if (pl) pl.textContent = ps.label || '-';
+  var cf = document.getElementById('cargoFamily');
+  if (cf) cf.textContent = ps.cargo_family || '-';
   document.getElementById('broadcast').textContent = s.dry_run ? 'dry_run（试运行）' : '已开启';
   // 猫娘智驾按钮（按状态显示）
   var pst = (s.pilot || {}).state || 'idle';
