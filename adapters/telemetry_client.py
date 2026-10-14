@@ -451,6 +451,25 @@ class TruckSnapshot:
         return self.speed_limit_mps * 3.6
 
     @property
+    def in_session(self) -> bool:
+        """是否处于"真的在开车"的状态。
+
+        **主菜单里 SDK 也是 active**，但速度 / 任务 / 油量全是 0——旧版把这些 0
+        当成真实数据，于是主人第一次进游戏还没出车库，猫娘就喊"没油了"、
+        面板显示 0% 该加油了、屏幕识屏还在报"前方有事故"。
+
+        判据（任一成立即算在驾驶中，且都不依赖"有没有接单"，自由驾驶也算）：
+          - 有任务
+          - 车在动
+          - 发动机着着且油箱有油（路边停车/等灯时也成立）
+        """
+        if not self.sdk_active:
+            return False
+        if self.on_job or self.speed_kmh > 1.0:
+            return True
+        return bool(self.engine_enabled and (self.fuel > 1.0 or self.fuel_percent > 1.0))
+
+    @property
     def is_speeding(self) -> bool:
         """超速判定：留出容差，别为"超 2 km/h"念叨。
 

@@ -192,6 +192,7 @@ class PawpilotRuntime:
         self._chat_bias: str = ""
         self._chat_bias_until: float = 0.0
         self._mood_drive: Optional[Dict[str, Any]] = None
+        self._session_live: bool = False
         self._ocr_interval = float(self.ocr_regions.get("scan_interval_s", 240))
         self._last_ocr_at = 0.0
         self._tick_task: Optional[asyncio.Task] = None
@@ -536,6 +537,7 @@ class PawpilotRuntime:
         arb = self.arbiter.snapshot()
         base = {
             "connected": s is not None and s.sdk_active,
+            "telemetry_live": s is not None,     # 真的在开车（不是主菜单的 0 值）
             "game_running": self._game_running,
             "dry_run": self.cfg.dry_run,
             "telemetry_install": self.telemetry_install_state,
@@ -707,13 +709,15 @@ class PawpilotRuntime:
                                 self._last_pilot_handback = time.time()
                         else:
                             self.pilot.tick_dry(s)
-                        # 只要 SDK 活跃就保留快照：主菜单/未接管时清空（避免 0 值
-                        # 被当成真实读数），但在游戏里停车休息也应该能陪聊
-                        # （2026-10：旧条件要求"有任务或车速>5"，服务区歇脚就没人陪了）
-                        if s.sdk_active:
+                        # 只有"真的在开车"才保留快照（供提议/闲聊/面板）：
+                        # 主菜单里 SDK 也 active 但全是 0，旧版把 0 当真实数据 →
+                        # 面板显示 0%、猫娘在车库里就开聊、识屏还报"前方有事故"。
+                        if s.in_session:
                             self._last_snap = s
+                            self._session_live = True
                         else:
                             self._last_snap = None
+                            self._session_live = False
                         # 推送车道排空：优先级队列里攒下的话，车道空了就放一条出来
                         await self.push.drain()
                         await asyncio.sleep(self.cfg.poll_interval_s)
@@ -745,7 +749,7 @@ class PawpilotRuntime:
                     self.memory.decay()
                     await self.memory.save()
                 snap = self._last_snap
-                if snap is None or not snap.sdk_active:
+                if snap is None or not snap.in_session:
                     continue
                 # 统一的"陪聊密度"倍率：面板播报频率 × 玩法画像 × 当前情绪。
                 # 2026-10 修正：以前只有事件冷却和陪玩维度吃这个倍率，电台/途经地点/

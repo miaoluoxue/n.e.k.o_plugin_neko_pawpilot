@@ -405,9 +405,9 @@ function statCard(label, val, cls, hint) {
 
 function renderDrive() {
   var s = state;
-  // 未连接时遥测字段全是 0（主菜单/未接管），不能当真实读数显示，
+  // 未连接 / 在主菜单时遥测字段全是 0，不能当真实读数显示，
   // 否则会看到"油量 0% 该加油了"这种假警报
-  var live = !!s.connected;
+  var live = !!s.telemetry_live;
   var speedTone = live && s.is_speeding ? 'red' : '';
   var connTxt = s.connected ? '已连接' : (s.game_running ? '游戏运行中' : '未检测到游戏');
   var connCls = s.connected ? 'green' : (s.game_running ? 'amber' : 'red');

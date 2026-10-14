@@ -11,20 +11,22 @@ import time
 from typing import List, Optional, Tuple
 
 # key, 关键词, 事实描述, 优先级权重
+# 关键词刻意收窄：OCR 读的是整屏文字，宽词会被无关内容命中——
+# 实证过两种误报：① 我们自己面板上的事件 id（crash / night_shift）被读进来，
+# 于是"前方有事故"；② 随便一段英文里的 rain/wet 触发"在下雨"。
 SCENE_KEYWORDS: List[Tuple[str, Tuple[str, ...], str, int]] = [
+    ("accident", ("accident", "事故"), "前方画面显示有事故", 5),
     ("police", ("police", "警车"), "屏幕/画面上出现了警车", 5),
-    ("accident", ("accident", "事故", "crash"), "前方画面显示有事故", 5),
-    ("snow", ("snow", "雪", "winter"), "画面里在下雪", 5),
-    ("rain", ("rain", "雨", "wet"), "画面里在下雨、路面是湿的", 4),
+    ("snow", ("snow", "雪"), "画面里在下雪", 5),
+    ("rain", ("rain", "雨"), "画面里在下雨、路面是湿的", 4),
     ("rest_area", ("rest area", "服务区", "休息区"), "画面/路边有服务区标识", 3),
-    ("fuel", ("gas", "fuel", "加油站", "油站"), "画面/路边有加油站标识", 3),
+    ("fuel", ("加油站", "油站", "fuel station"), "画面/路边有加油站标识", 3),
     ("toll", ("toll", "收费", "收费站"), "前边是要过收费站的路段", 3),
     ("tunnel", ("tunnel", "隧道"), "正在进入隧道", 2),
     ("city", ("city", "城市", "town"), "画面显示已经进入城市区域", 2),
     ("highway", ("highway", "高速", "motorway"), "画面显示上了高速公路", 2),
     ("bridge", ("bridge", "桥"), "正在过桥", 2),
     ("border", ("border", "边境", "海关"), "到了边境/海关区域", 2),
-    ("night", ("night", "night"), "画面里已经入夜", 2),
 ]
 
 # 会改变驾驶决策的画面信息 → 走内容车道

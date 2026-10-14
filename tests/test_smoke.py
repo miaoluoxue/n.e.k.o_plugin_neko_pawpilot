@@ -1125,6 +1125,52 @@ def test_angle_dedupe_and_pacing_config():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_main_menu_is_not_a_session():
+    """主菜单 != 在开车：SDK 在主菜单也是 active，但全是 0。
+
+    实测反馈：第一次进游戏还没出车库，猫娘就喊"没油了"、面板显示 0% 该加油了、
+    识屏还报"前方有事故"。根因是旧版把 sdk_active 当成"在开车"。
+    """
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    def menu():
+        """主菜单：SDK active，但速度/任务/发动机/油量全 0（实测形态）。"""
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.speed_mps = 0.0
+        s.on_job = False
+        s.engine_enabled = False
+        s.fuel = 0.0
+        s.fuel_capacity = 1000.0        # 共享内存残留上一辆车的容量
+        return s
+
+    m = menu()
+    assert m.sdk_active is True
+    assert m.in_session is False          # ← 关键：主菜单不算在驾驶
+    assert m.fuel_percent == 0.0          # 面板上那个假的 0%
+
+    # 主菜单里绝不能再报低油量
+    eng = EventEngine(_cfg())
+    got = []
+    eng.on_event(lambda ev: got.append(ev.name))
+    eng.feed(m)
+    assert "low_fuel" not in got, got
+
+    # 各种"真的在开车"的形态都要判成在驾驶
+    for kw in ({"on_job": True},                    # 有任务（停在卸货区也算）
+               {"speed_mps": 60 / 3.6},             # 车在动
+               {"engine_enabled": True, "fuel": 300.0}):  # 着车且油箱有油（等灯/路边停）
+        s = menu()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        assert s.in_session is True, kw
+    # 没油又没着车 → 不算（主菜单）
+    s2 = menu()
+    s2.engine_enabled = True
+    s2.fuel = 0.0
+    assert s2.in_session is False
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 

@@ -236,7 +236,8 @@ class EventEngine:
             ev = self._emit(EV_REFUEL, s, force=True)
             if ev:
                 out.append(ev)
-        elif self._fuel_last is not None and s.fuel > self._fuel_last + 20:
+        elif self._fuel_last is not None and s.fuel > self._fuel_last + 20 \
+                and s.in_session:
             ev = self._emit(EV_REFUEL, s)
             if ev:
                 out.append(ev)
@@ -245,7 +246,7 @@ class EventEngine:
         # 只在真的在开车时才报低油量：主菜单里共享内存会残留上一辆车的
         # fuelCapacity 而 fuel 已经归零，旧条件会误判成"没油了"（实测面板 0% + 该加油了）
         if (s.fuel_capacity > 0 and s.fuel_percent < self.low_fuel_pct
-                and (s.sdk_active or s.speed_kmh > 1.0)):
+                and s.in_session):
             if not self._warned_low_fuel:
                 ev = self._emit(EV_LOW_FUEL, s, {"percent": s.fuel_percent})
                 if ev:
