@@ -1209,6 +1209,79 @@ def test_fuel_advice_by_range():
     assert p.fuel_advice(_Snap(400, 0, 50), now=t3 + 2) is None
 
 
+def test_ocr_reads_only_the_game_window():
+    """识屏只能读游戏窗口；游戏不在前台 → 一个字都不读。
+
+    实地翻车（2026-10，主人原话"说假话，我车都没动，怎么就跑隧道了"）：
+    旧版截的是**整个虚拟桌面**，主人开着插件面板和 DSH 桌面端玩游戏，
+    面板「教程」页里就有"隧道"两个字（知识库里本来就有），于是推
+    「正在进入隧道」；别处一句带"雨"的字又推出「确认在下雨」。
+    """
+    from plugin.plugins.neko_pawpilot.adapters import hud_ocr as H
+
+    class _P:
+        def data_path(self, *a):
+            return pathlib.Path(".")
+
+    o = H.HudOcr(_P(), game_titles=["Euro Truck Simulator 2"])
+
+    class _Backend:
+        def extract_text(self, img):
+            return "隧道"
+
+    o._backend = _Backend()
+    o._ok = True
+    grabbed = []
+    o.capture = lambda region=None: (grabbed.append(region), "IMG")[1]
+
+    # ① 前台是面板/桌面端 → 不截、不读、不猜
+    H.foreground_window = lambda: (111, "N.E.K.O 猫爪副驾插件")
+    assert o.read_game_text() == ""
+    assert grabbed == [], "游戏不在前台还去截图 = 读到的就是面板和桌面"
+    assert "不是游戏" in o.snapshot()["note"]
+
+    # ② 前台真是游戏 → 正常读
+    H.foreground_window = lambda: (222, "Euro Truck Simulator 2 - 1.50")
+    H.window_client_rect = lambda hwnd: (100, 200, 1280, 720)
+    assert o.read_game_text() == "隧道"
+    assert grabbed == [(100, 200, 1280, 720)], "应当只截游戏窗口客户区"
+
+
+def test_reload_does_not_regreet():
+    """插件重载 ≠ 主人刚打开游戏：不能重复喊「主人打开了欧卡2」。
+
+    实地翻车：我在会话中途重载了两次插件，主人连着听到两次开局招呼，
+    直接判定"说假话"。
+    """
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    def live():
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.on_job = True
+        return s
+
+    # 冷启动（插件加载时游戏没开）→ 该喊就喊
+    cold = EventEngine(_cfg())
+    got = []
+    cold.on_event(lambda ev: got.append(ev.name))
+    cold.feed(live())
+    assert "game_start" in got, got
+
+    # 重载（加载时游戏已经在跑）→ 只接管状态，不喊
+    warm = EventEngine(_cfg())
+    warm.skip_next_game_start()
+    got2 = []
+    warm.on_event(lambda ev: got2.append(ev.name))
+    warm.feed(live())
+    assert "game_start" not in got2, got2
+    # 但他真的重启游戏时，招呼还得说
+    warm.feed(TruckSnapshot())          # sdk 失活（游戏关了）
+    got2.clear()
+    warm.feed(live())
+    assert "game_start" in got2, got2
+
+
 def test_hud_ocr_degrades_gracefully():
     """截屏后端降级链：mss 缺失时不能一上来就判定"不可用"。
 

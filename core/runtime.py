@@ -184,6 +184,7 @@ class PawpilotRuntime:
         self._game_dir: Optional[str] = None
         self.ocr_regions = self._load_ocr_regions()
         self.hud_ocr = None  # 惰性：OCR 可用时创建
+        self._game_window_titles = self.ocr_regions.get("game_window_titles") or None
         self._pending_photo_scene: str = ""
         self._pending_photo_until: float = 0.0
         self._last_km: float = 0.0
@@ -682,13 +683,21 @@ class PawpilotRuntime:
 
     async def _tick_loop(self) -> None:
         r = TelemetryReader()
+        self._boot_probe_done = False
         while True:
             try:
                 if not r.open():
                     self._game_running = False
                     self._last_snap = None
+                    self._boot_probe_done = True
                     await asyncio.sleep(2.0)
                     continue
+                if not self._boot_probe_done:
+                    # 插件刚加载就发现游戏已经在跑 → 多半是主人点了「重载」，
+                    # 不能当成"刚打开游戏"再喊一次「主人打开了欧卡2」。
+                    # 实证：重载两次就喊两次，主人直接判定"说假话"。
+                    self._boot_probe_done = True
+                    self.engine.skip_next_game_start()
                 self._game_running = True
                 try:
                     while True:
@@ -773,8 +782,11 @@ class PawpilotRuntime:
                             priority=CHAT, topic="photo"))
                         continue
                     if scene_topic:
-                        # 画面里真看到的东西（警车/事故/隧道/收费站…）：按内容走重要车道
-                        await self.push.push_fact(scene_topic, priority=IMPORTANT,
+                        # 画面里真看到的东西（警车/事故/隧道/收费站…）。
+                        # 走 chat 而不是 important：识屏是整条链里最不可靠的一环
+                        # （OCR 可能认错字、可能读到别处文字），不值得插队抢占播报，
+                        # 更不该在他没动的时候打断别的正事。
+                        await self.push.push_fact(scene_topic, priority=CHAT,
                                                   topic="screen")
                         continue
                 # ── 接力驾驶提议：开阔路段主动提出"我来开一段"（有动作，不是话）
@@ -903,30 +915,34 @@ class PawpilotRuntime:
                                            type(exc).__name__, exc)
                 await asyncio.sleep(15.0)
 
-    async def _ocr_scene_topic(self) -> Optional[str]:
-        """OCR 截屏识别 → 普通场景话题（美景不在这里处理，见 _ocr_scan）。"""
-        ask, topic = await self._ocr_scan()
-        return topic if not ask else None
+    def _hud(self) -> Any:
+        """惰性创建 OCR（把配置里的游戏窗口标题一起带进去）。"""
+        if self.hud_ocr is None:
+            from ..adapters.hud_ocr import HudOcr
+            self.hud_ocr = HudOcr(self.plugin, game_titles=self._game_window_titles)
+        return self.hud_ocr
 
     async def _ocr_scan(self) -> tuple:
         """一次截屏识别，返回 (美景拍照问句, 普通场景话题)。
 
         2026-10 主人定调："识别到好风景要询问要不要拍照"——所以美景不再自动拍，
         改成先问一句，主人答应（面板按钮或直接说"拍吧"）才真的拍。
+
+        2026-10 又一条：识屏**只读游戏窗口**。以前截整个虚拟桌面，把插件面板和
+        DSH 桌面端的文字一起读进来，从里面匹到"隧道/雨"就当成游戏画面推给主人，
+        他车停着没动却听到"隧道里这么黑"——那就是假话。现在游戏不在前台一个字都不读。
         """
-        if self.hud_ocr is None:
-            from ..adapters.hud_ocr import HudOcr
-            self.hud_ocr = HudOcr(self.plugin)
-            if not self.hud_ocr.is_available():
-                return "", ""
-        text = await asyncio.to_thread(self.hud_ocr.read_text)
-        if not text:
-            self.plugin.logger.info("[OCR] 没读到文字（可用=%s 错误=%s）",
-                                    self.hud_ocr.is_available(),
-                                    (self.hud_ocr.snapshot() or {}).get("error", ""))
+        hud = self._hud()
+        if not hud.is_available():
             return "", ""
-        self.plugin.logger.info("[OCR] 读到 %d 字: %s",
-                                len(text), " ".join(text.split())[:120])
+        text = await asyncio.to_thread(hud.read_game_text)
+        if not text:
+            note = (hud.snapshot() or {}).get("note", "")
+            self.plugin.logger.info("[OCR] 这次没读到游戏画面文字：%s", note or "(无说明)")
+            return "", ""
+        self.plugin.logger.info("[OCR] 读到 %d 字（%s）: %s",
+                                len(text), (hud.snapshot() or {}).get("note", ""),
+                                " ".join(text.split())[:120])
         # 天气线索（OCR 里出现雨/雪/雾就记一笔）——供猫娘电台与路况叙述引用
         low = text.lower()
         for kw, label in (("rain", "雨"), ("雨", "雨"), ("snow", "雪"),
@@ -1014,13 +1030,15 @@ class PawpilotRuntime:
                               f"累计 {self.diary.snapshot()['count']} 条")
         add("地点簿", True, f"认识 {self.places.count()} 个地名")
 
-        # ── 识屏（真的构造一次后端 + 截一张图）──
-        if self.hud_ocr is None:
-            from ..adapters.hud_ocr import HudOcr
-            self.hud_ocr = HudOcr(self.plugin)
-        ocr = self.hud_ocr.snapshot()
+        # ── 识屏（真的构造一次后端 + 看一眼前台窗口）──
+        hud = self._hud()
+        ocr = hud.snapshot()
+        fg_ok, fg_title = hud.game_foreground()
         if ocr.get("available"):
-            add("屏幕识别", True, f"截屏后端 {ocr.get('capture') or 'gdi'} · OCR 后端就绪")
+            detail = (f"截屏后端 {ocr.get('capture') or 'gdi'} · OCR 后端就绪"
+                      f" · 前台「{fg_title or '未知'}」")
+            add("屏幕识别", True, detail,
+                "" if fg_ok else "识屏只在游戏窗口是前台时生效，切到游戏里再测")
         else:
             add("屏幕识别", False, ocr.get("error", "不可用"), "没有它就只能靠遥测")
 
@@ -1051,17 +1069,22 @@ class PawpilotRuntime:
 
         `auto=False` 表示这是明确要求，跳过相册冷却。
         """
-        if self.hud_ocr is None:
-            from ..adapters.hud_ocr import HudOcr
-            self.hud_ocr = HudOcr(self.plugin)
-        if not self.hud_ocr.is_available():
+        hud = self._hud()
+        if not hud.is_available():
             return {"ok": False, "summary": "现在抓不到画面喵（截屏组件不可用）"}
         if not scene:
             scene = self._pending_photo_scene or "scenery"
-        record = await self.photo_album.shoot(scene, self.hud_ocr,
-                                              force=not auto)
+        record = await self.photo_album.shoot(scene, hud,
+                                              force=not auto,
+                                              allow_background=not auto)
         if not record:
-            return {"ok": False, "summary": "刚拍过一张喵，过十分钟再拍~"}
+            reason = getattr(self.photo_album, "last_reason", "")
+            if reason == "cooldown":
+                return {"ok": False, "summary": "刚拍过一张喵，过十分钟再拍~"}
+            if "不是游戏" in reason:
+                return {"ok": False,
+                        "summary": f"抓不到画面喵：{reason}——把游戏切到前台再拍"}
+            return {"ok": False, "summary": f"拍照没成喵：{reason or '原因不明'}"}
         self._pending_photo_scene = ""
         self.recall.on_relationship("last_photo", {"value": scene}, importance=0.3)
         await self.push.push_fact(

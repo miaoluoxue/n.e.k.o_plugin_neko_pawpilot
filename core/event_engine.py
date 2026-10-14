@@ -95,6 +95,8 @@ class EventEngine:
         self.brake_speed = config.hard_brake_speed_kmh
         self.low_fuel_pct = config.low_fuel_percent
         self._last: Optional[TruckSnapshot] = None
+        # 插件重载时游戏本来就在跑：这个时间戳之前不许喊「主人打开了欧卡2」
+        self._skip_start_until: float = 0.0
         self._fuel_last: Optional[float] = None
         self._damage_last: Optional[float] = None
         self._damage_hist: List[tuple] = []   # [(ts, max_damage)] 碰撞时间窗
@@ -151,6 +153,15 @@ class EventEngine:
             s(ev)
         return ev
 
+    def skip_next_game_start(self, ttl: float = 180.0) -> None:
+        """接下来 ttl 秒内不播报 game_start。
+
+        场景：面板点「重载」时游戏正在运行，插件重新加载 → `_last` 是空的，
+        旧逻辑会当成"主人刚打开游戏"再喊一次问候。实测重载两次就喊两次，
+        主人听到的就是重复的假话。带 TTL 是为了万一这期间他真去重启游戏。
+        """
+        self._skip_start_until = time.time() + max(0.0, float(ttl))
+
     def feed(self, s: TruckSnapshot) -> List[TruckEvent]:
         out: List[TruckEvent] = []
         now = time.time()
@@ -169,9 +180,13 @@ class EventEngine:
             return out
 
         if prev is None or not prev.sdk_active:
-            ev = self._emit(EV_GAME_START, s, force=True)
-            if ev:
-                out.append(ev)
+            if now < self._skip_start_until:
+                # 插件刚加载时游戏就已经在跑（重载）：只接管状态，不播报开局招呼
+                self._skip_start_until = 0.0
+            else:
+                ev = self._emit(EV_GAME_START, s, force=True)
+                if ev:
+                    out.append(ev)
 
         if s.is_speeding:
             quiet = (now - self._last_speeding_fire) >= self.speeding_reset_s

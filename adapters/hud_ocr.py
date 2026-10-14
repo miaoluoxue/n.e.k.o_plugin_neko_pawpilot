@@ -11,6 +11,12 @@
 所以截屏以**纯 ctypes 调 Windows GDI BitBlt** 为准（标准库，必然可用），
 mss / Pillow.ImageGrab 只作为更快的备选先试。宿主 RapidOCR 后端还强制要求
 插件自报 `plugin_id`，旧版没传 → `__init__` 直接 TypeError（第二个死因）。
+
+**2026-10 又一处实地翻车：截的是整个虚拟桌面，不是游戏画面。**
+主人把插件面板/DSH 桌面端开着玩游戏，全屏截图的文字全被读进来——
+面板「教程」页里有"隧道"字样（知识库里就有），于是推出「正在进入隧道」；
+别处一句带"雨"的字，就推「确认在下雨」。他车停在车库没动，听到这些就是假话。
+所以现在：**只在前台窗口是游戏时、只截游戏窗口客户区**，否则这一次识屏直接跳过。
 """
 
 from __future__ import annotations
@@ -19,6 +25,14 @@ import importlib.util
 from typing import Any, Dict, List, Optional, Tuple
 
 PLUGIN_ID = "neko_pawpilot"
+
+# 游戏窗口标题（小写子串匹配）。配置里可覆盖：ocr_regions.json → game_window_titles
+GAME_TITLES_DEFAULT = (
+    "euro truck simulator 2",
+    "eurotrucks2",
+    "american truck simulator",
+    "amtrucks",
+)
 
 _SRCCOPY = 0x00CC0020
 _DIB_RGB_COLORS = 0
@@ -31,6 +45,64 @@ _SM_CXVIRTUALSCREEN = 78
 _SM_CYVIRTUALSCREEN = 79
 
 
+def _ensure_dpi_aware() -> None:
+    """DPI 感知：不做的话在缩放屏上拿到的坐标会被系统缩放、截出来的图也是模糊的。"""
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:                       # noqa: BLE001
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:                       # noqa: BLE001
+        pass
+
+
+def foreground_window() -> Tuple[int, str]:
+    """当前前台窗口 (hwnd, 标题)；拿不到返回 (0, "")。"""
+    try:
+        import ctypes
+        _ensure_dpi_aware()
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetForegroundWindow() or 0)
+        if not hwnd:
+            return 0, ""
+        length = int(user32.GetWindowTextLengthW(hwnd))
+        buf = ctypes.create_unicode_buffer(max(length + 2, 260))
+        user32.GetWindowTextW(hwnd, buf, len(buf))
+        return hwnd, (buf.value or "")
+    except Exception:                       # noqa: BLE001
+        return 0, ""
+
+
+def window_client_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
+    """窗口客户区在屏幕上的 (left, top, width, height)；失败返回 None。
+
+    用客户区而不是整窗，是为了排除标题栏/边框。全屏模式下就等于整屏。
+    """
+    if not hwnd:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _ensure_dpi_aware()
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return None
+        pt = wintypes.POINT(0, 0)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+            return None
+        w = int(rect.right - rect.left)
+        h = int(rect.bottom - rect.top)
+        if w <= 0 or h <= 0:
+            return None
+        return (int(pt.x), int(pt.y), w, h)
+    except Exception:                       # noqa: BLE001
+        return None
+
+
 def _grab_gdi(region: Optional[Tuple[int, int, int, int]] = None) -> Any:
     """纯 ctypes 的 Windows GDI 截屏，返回 PIL.Image（无第三方依赖）。"""
     import ctypes
@@ -41,14 +113,7 @@ def _grab_gdi(region: Optional[Tuple[int, int, int, int]] = None) -> Any:
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
 
-    # DPI 感知：不做的话在缩放屏上拿到的是被系统缩放过的模糊图
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:                       # noqa: BLE001
-        try:
-            user32.SetProcessDPIAware()
-        except Exception:                   # noqa: BLE001
-            pass
+    _ensure_dpi_aware()
 
     if region:
         x, y, w, h = (int(region[0]), int(region[1]), int(region[2]), int(region[3]))
@@ -107,15 +172,33 @@ def _grab_gdi(region: Optional[Tuple[int, int, int, int]] = None) -> Any:
 
 
 class HudOcr:
-    """截屏（GDI / mss / Pillow）+ 宿主 RapidOCR 识别屏幕文本。"""
+    """截屏（GDI / mss / Pillow）+ 宿主 RapidOCR 识别屏幕文本。
 
-    def __init__(self, plugin: Any) -> None:
+    对外只推荐 `read_game_text()`：它自带"前台是不是游戏"的判定，
+    游戏不在前台就一个字都不读——否则读到的会是我们自己的面板和桌面。
+    """
+
+    def __init__(self, plugin: Any, game_titles: Optional[Any] = None) -> None:
         self.plugin = plugin
+        self.game_titles: Tuple[str, ...] = tuple(
+            str(t).strip().lower() for t in (game_titles or GAME_TITLES_DEFAULT) if str(t).strip()
+        ) or GAME_TITLES_DEFAULT
         self._backend: Optional[Any] = None
         self._sct = None
         self._capture_kind: str = ""
         self._error: Optional[str] = None
         self._ok = False
+        self._last_fg: str = ""            # 最近一次看到的前台窗口标题
+        self._last_note: str = ""          # 最近一次截屏的说明（面板/自检要看）
+        self._last_game_hwnd: int = 0       # 上次确认是游戏的窗口（手动拍照回退用）
+
+    # ── 前台窗口判定 ──
+    def game_foreground(self) -> Tuple[bool, str]:
+        """当前前台窗口是不是游戏。返回 (是否游戏, 标题)。"""
+        _hwnd, title = foreground_window()
+        self._last_fg = title
+        low = title.lower()
+        return (bool(low) and any(k in low for k in self.game_titles)), title
 
     # ── 后端选择 ──
     def _capture_order(self) -> List[str]:
@@ -204,7 +287,11 @@ class HudOcr:
         return None
 
     def read_text(self, region: Optional[Tuple[int, int, int, int]] = None) -> str:
-        """识别指定区域文本；空区域 = 全屏。"""
+        """识别指定区域文本；空区域 = 全屏。
+
+        注意：空区域是**整个虚拟桌面**（多屏都算），只适合调试；
+        正常识屏走 `read_game_text()`，它只截游戏窗口。
+        """
         if not self._ensure():
             return ""
         try:
@@ -216,7 +303,50 @@ class HudOcr:
             self._error = str(exc)
             return ""
 
+    # ── 游戏画面（唯一推荐的识屏入口）──
+    def capture_game(self, allow_background: bool = False) -> Tuple[Optional[Any], str]:
+        """只截游戏窗口客户区。游戏不在前台 → (None, 原因)。
+
+        allow_background：手动点「拍一张」时前台窗口会变成面板自己，
+        这时按**上次记住的游戏窗口**坐标截（游戏还显示在屏幕上就没问题）。
+        自动识屏永远走 False —— 绝不能在他没看游戏时凭记忆截屏播报。
+        """
+        ok, title = self.game_foreground()
+        hwnd = 0
+        if ok:
+            hwnd, title = foreground_window()
+            self._last_game_hwnd = hwnd
+        elif allow_background and self._last_game_hwnd:
+            hwnd = self._last_game_hwnd
+            title = f"{title}（按上次记住的游戏窗口回退）"
+        else:
+            self._last_note = f"前台窗口不是游戏（{title or '未知'}），这次不截"
+            return None, self._last_note
+        region = window_client_rect(hwnd)
+        if region:
+            self._last_note = f"游戏窗口 {title}｜客户区 {region[2]}x{region[3]}"
+        else:
+            self._last_note = f"游戏窗口 {title}｜拿不到客户区，退回全屏"
+        return self.capture(region), self._last_note
+
+    def read_game_text(self) -> str:
+        """读游戏画面文字。游戏不在前台 / 后端不可用 → 返回空串（不猜）。"""
+        if not self._ensure():
+            self._last_note = f"OCR 后端不可用：{self._error or '未知'}"
+            return ""
+        img, note = self.capture_game()
+        if img is None:
+            return ""
+        try:
+            return self._backend.extract_text(img) or ""
+        except Exception as exc:            # noqa: BLE001
+            self._error = str(exc)
+            self._last_note = f"{note}｜识别失败：{exc}"
+            return ""
+
     def snapshot(self) -> Dict[str, Any]:
         ok = self._ensure()
         return {"available": ok, "capture": self._capture_kind,
-                "error": self._error or ""}
+                "error": self._error or "",
+                "foreground": self._last_fg,
+                "note": self._last_note}

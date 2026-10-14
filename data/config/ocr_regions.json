@@ -29,5 +29,12 @@
       "note": "速度表（待标定）"
     }
   },
+  "game_window_titles": [
+    "Euro Truck Simulator 2",
+    "EuroTruckSimulator2",
+    "eurotrucks2",
+    "American Truck Simulator",
+    "amtrucks"
+  ],
   "scan_interval_s": 240
 }
