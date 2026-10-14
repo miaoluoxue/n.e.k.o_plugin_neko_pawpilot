@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from .vehicle import trailer_config
+
 
 @dataclass(frozen=True)
 class Dimension:
@@ -152,7 +154,11 @@ def f_truck(snap, ctx) -> str:
         bits.append(f"刹车温度 {snap.brake_temperature:.0f}°C")
     if snap.battery_voltage and snap.battery_voltage < 24.5:
         bits.append(f"电压 {snap.battery_voltage:.1f}V")
-    if snap.trailer_attached and snap.trailer_license:
+    # 挂车编组（ETS2 真实的多节挂车玩法）
+    label, tip = trailer_config(int(getattr(snap, "trailer_count", 0) or 0))
+    if label and label != "单节挂车":
+        bits.append(f"{label}（要点：{tip}）")
+    elif snap.trailer_attached and snap.trailer_license:
         bits.append(f"挂着挂车 {snap.trailer_license}")
     elif snap.truck_license:
         bits.append(f"车牌 {snap.truck_license}")

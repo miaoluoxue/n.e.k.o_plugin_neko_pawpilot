@@ -754,6 +754,54 @@ def test_cargo_family_and_playstyle():
     assert offence_note("something unknown") == ""
 
 
+def test_vehicle_parts_and_trailer_config():
+    """按部位车损 + 多节挂车：都对应游戏真实机制（修理厂按部位报价）。"""
+    from plugin.plugins.neko_pawpilot.core.playstyle import PlaystyleBook
+    from plugin.plugins.neko_pawpilot.core.vehicle import (
+        PART_LABELS,
+        damage_sentence,
+        part_report,
+        trailer_config,
+        worst_part,
+    )
+
+    parts = {"engine": 0.08, "transmission": 0.05, "cabin": 0.21,
+             "chassis": 0.02, "wheels": 0.14}
+    rep = part_report(parts, 300.0)          # 3 万欧的估算口径（max_damage*1000）
+    assert rep[0]["label"] == "驾驶室" and rep[0]["pct"] == 21.0
+    assert abs(sum(e["cost"] for e in rep) - 300.0) < 1.0     # 占比分摊，总额守恒
+    assert worst_part(parts)["key"] == "cabin"
+    assert worst_part({"engine": 0.001}) is None              # 太轻不报
+    sentence = damage_sentence(parts, 0.21)
+    assert "驾驶室 21%" in sentence and "修车费" in sentence
+    assert "粗估" in sentence and "只修最重的那一项" in sentence   # 真实：可按部位修
+    assert set(PART_LABELS) == {"engine", "transmission", "cabin", "chassis", "wheels"}
+
+    # 挂车编组（1/2/3 节）
+    assert trailer_config(0) == ("", "")
+    assert trailer_config(1)[0] == "单节挂车"
+    label2, tip2 = trailer_config(2)
+    assert "双挂车" in label2 and "内轮差" in tip2
+    label3, tip3 = trailer_config(3)
+    assert "三挂车" in label3 and "变道" in tip3
+
+    # 多节挂车会被识成独立玩法（优先级高于普通重载判定）
+    pb = PlaystyleBook()
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.on_job = True
+    s.speed_mps = 60 / 3.6
+    s.cargo = "普通货"
+    s.cargo_mass = 20_000.0
+    s.trailer_count = 2
+    s.map_scale = 19.0
+    s.time_abs_min = 12 * 60
+    st = pb.classify(s)
+    assert st.key == "multi_trailer" and "内轮差" in st.advice
+    s.trailer_count = 1
+    assert pb.classify(s).key != "multi_trailer"
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 

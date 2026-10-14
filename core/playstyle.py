@@ -34,6 +34,8 @@ STYLES = {
     "scenic":        Playstyle("scenic", "观光路", "scenery", 1.3),
     "city_delivery": Playstyle("city_delivery", "市区配送", "city", 0.7),
     "heavy_haul":    Playstyle("heavy_haul", "重载/超限", "truck", 0.8),
+    "multi_trailer": Playstyle("multi_trailer", "多节挂车", "truck", 0.8,
+                               "编组很长：转弯内轮差大、变道要留足空间、倒车尽量别试"),
     "hurry":         Playstyle("hurry", "赶时间", "progress", 0.8),
     "night_shift":   Playstyle("night_shift", "夜班", "night", 1.0),
     "long_haul":     Playstyle("long_haul", "长途巡航", "cruise", 1.1),
@@ -68,7 +70,10 @@ class PlaystyleBook:
         if speed < 5:
             return STYLES["delivery"]
 
-        # ③ 载重/货物类型：重载优先于其它（它改变整趟的驾驶方式）
+        # ③ 多节挂车（北欧双挂/三挂）：编组本身就改变驾驶方式，优先级最高
+        if int(getattr(snap, "trailer_count", 0) or 0) >= 2:
+            return STYLES["multi_trailer"]
+        # ④ 载重/货物类型：重载优先于其它（它改变整趟的驾驶方式）
         fam = self.cargo.classify(getattr(snap, "cargo_id", ""),
                                   getattr(snap, "cargo", ""))
         heavy = mass_t >= 25.0 or (fam and fam["key"] == "heavy")

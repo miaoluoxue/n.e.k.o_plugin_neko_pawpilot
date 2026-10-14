@@ -36,6 +36,7 @@ from .safety_guard import SafetyGuard
 from .scene_chat import SceneChat
 from .templates import EmotionRenderer, offence_note
 from .trip_summary import TripSummary
+from .vehicle import damage_sentence, trailer_config
 
 ACTIVITY_TITLES = {
     "speeding": "超速",
@@ -1371,11 +1372,18 @@ class PawpilotRuntime:
         if ev.name == "cargo_damage":
             return self.emotion.fact_prompt(ev.name, pct=ev.data.get("pct", 0))
         if ev.name == "vehicle_damage":
+            # 按部位说清"伤在哪、大概多少修车费"（估算口径）
             return self.emotion.fact_prompt(
                 ev.name,
                 percent=ev.data.get("percent", 0.0),
                 parts=ev.data.get("parts", ""),
+                detail=damage_sentence(s.damage_parts, s.max_damage),
             )
+        if ev.name == "trailer_attach":
+            label, tip = trailer_config(int(getattr(s, "trailer_count", 0) or 0))
+            return self.emotion.fact_prompt(
+                ev.name, plate=s.trailer_license,
+                config=(f"编组：{label}（{tip}）" if label and tip else ""))
         if ev.name == "brake_temp_high":
             return self.emotion.fact_prompt(
                 ev.name, temp=ev.data.get("temp", 0.0),

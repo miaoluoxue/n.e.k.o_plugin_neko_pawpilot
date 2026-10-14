@@ -434,6 +434,8 @@ class TruckSnapshot:
     train_source: str = ""
     train_target: str = ""
     trailer_attached: bool = False
+    trailer_count: int = 0            # 真正挂上的挂车节数（ETS2 最多 3 节）
+    trailer_licenses: str = ""        # 各节车牌，逗号分隔
     trailer_cargo_damage: float = 0.0
     trailer_license: str = ""
     world_x: float = 0.0
@@ -753,8 +755,29 @@ class TelemetryReader:
         s.ferry_target = _cstr(gs.ferryTargetName)
         s.train_source = _cstr(gs.trainSourceName)
         s.train_target = _cstr(gs.trainTargetName)
+        # 挂车：SDK 给的是 10 槽数组，ETS2 实际最多 3 节（北欧多节挂车）。
+        # 旧版只读第 0 节 → 双挂/三挂车在插件眼里和单挂一样。这里统计真正
+        # attached 的槽位数，并取货损最大的那节（货损可能挂在不同节上）。
+        s.trailer_count = 0
+        s.trailer_licenses = ""
+        plates, worst_damage = [], 0.0
+        for slot in m.trailer.trailer:
+            try:
+                if not bool(slot.com_b.attached):
+                    continue
+            except Exception:               # noqa: BLE001
+                continue
+            s.trailer_count += 1
+            plate = _cstr(slot.con_s.licensePlate)
+            if plate:
+                plates.append(plate)
+            try:
+                worst_damage = max(worst_damage, float(slot.com_f.cargoDamage or 0.0))
+            except Exception:               # noqa: BLE001
+                pass
         tr = m.trailer.trailer[0]
         s.trailer_attached = bool(tr.com_b.attached)
-        s.trailer_cargo_damage = tr.com_f.cargoDamage
-        s.trailer_license = _cstr(tr.con_s.licensePlate)
+        s.trailer_cargo_damage = max(float(tr.com_f.cargoDamage or 0.0), worst_damage)
+        s.trailer_license = _cstr(tr.con_s.licensePlate) or (plates[0] if plates else "")
+        s.trailer_licenses = ",".join(plates)
         return s
