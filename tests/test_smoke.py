@@ -911,6 +911,64 @@ def test_self_check_diagnose():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_event_routes_cover_catalog():
+    """事件路由表必须覆盖事件目录里的每一个事件——"谁走哪条道"一目了然。"""
+    from plugin.plugins.neko_pawpilot.core.event_catalog import EVENT_CATALOG
+    from plugin.plugins.neko_pawpilot.core.runtime import (
+        CONTENT_EVENTS,
+        CRITICAL_EVENTS,
+        EVENT_ROUTES,
+        ROUTE_CONTENT,
+        ROUTE_NORMAL,
+        ROUTE_OWN,
+        route_of,
+    )
+
+    allowed = {ROUTE_OWN, ROUTE_CONTENT, ROUTE_NORMAL}
+    for name in EVENT_CATALOG:
+        assert route_of(name) in allowed, name
+    # 每一类都点到名，且互不重叠
+    assert route_of("crash") == ROUTE_OWN
+    assert route_of("job_delivered") == ROUTE_OWN
+    assert route_of("trip_progress") == ROUTE_CONTENT
+    assert route_of("mountain_pass") == ROUTE_CONTENT
+    assert route_of("speeding") == ROUTE_NORMAL
+    assert not (CONTENT_EVENTS & CRITICAL_EVENTS), "内容类与紧急类不能重叠"
+    for name in CRITICAL_EVENTS:
+        assert route_of(name) in allowed
+    # 表里点名的键必须都在事件目录里（防拼写错误导致规则永不生效）
+    unknown = set(EVENT_ROUTES) - set(EVENT_CATALOG)
+    assert not unknown, f"路由表里有目录中不存在的事件：{unknown}"
+    # mountain_pass / ferry / train 都要能渲染出事实行（不再内联硬编码指令）
+    r = EmotionRenderer(Persona())
+    assert "海拔" in r.fact_prompt("mountain_pass", climb_m=320, altitude=1450)
+    assert "渡轮" in r.fact_prompt("ferry", source="Calais", target="Dover")
+    assert "火车" in r.fact_prompt("train", source="A", target="B")
+
+
+def test_chatter_multiplier_is_uniform():
+    """「播报频率」要能一并管住电台与途经地点，而不只是事件冷却。"""
+    from plugin.plugins.neko_pawpilot.core.radio import RadioDJ
+
+    cfg = _cfg()
+    cfg.radio_interval_s = 600.0
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.speed_mps = 80 / 3.6
+    s.time_abs_min = 14 * 60
+    # 标准倍率：800 秒时已超过 600 秒间隔 → 该播
+    dj1 = RadioDJ(cfg)
+    assert dj1.pick(s, 800.0, interval_mult=1.0) is not None
+    # 安静倍率 1.6×：阈值变成 960 秒，同样的 800 秒不该播
+    dj2 = RadioDJ(cfg)
+    assert dj2.pick(s, 800.0, interval_mult=1.6) is None
+    assert dj2.pick(s, 1000.0, interval_mult=1.6) is not None
+    # 关闭电台仍然是关闭（0 = 关）
+    cfg2 = _cfg()
+    cfg2.radio_interval_s = 0.0
+    assert RadioDJ(cfg2).pick(s, 1000.0, interval_mult=0.5) is None
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 

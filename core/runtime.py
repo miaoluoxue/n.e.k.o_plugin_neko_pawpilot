@@ -86,6 +86,32 @@ CRITICAL_EVENTS = frozenset({
     "engine_stalled",   # 行驶中熄火
 })
 
+# ── 事件路由表：唯一说明"哪个事件走哪条道"的地方 ──────────────────
+#   own     —— 有专属处理（带副作用，自己决定说什么、什么时候说）
+#   content —— 内容类：一次性/长间隔的真实内容，绕过仲裁直接说
+#   normal  —— 常规：过仲裁后按优先级说（在 CRITICAL_EVENTS 里的走紧急车道）
+# 改行为先看这张表；test_event_routes_cover_catalog 会守住它覆盖全部事件。
+ROUTE_OWN = "own"
+ROUTE_CONTENT = "content"
+ROUTE_NORMAL = "normal"
+
+EVENT_ROUTES: Dict[str, str] = {}
+EVENT_ROUTES.update({name: ROUTE_OWN for name in (
+    "job_start",        # 接单：记城市/货物、地点簿、开场故事
+    "job_delivered",    # 到货：归档、日记、结算、城市打卡
+    "crash",            # 事故：事故链叙事 + 话题倾向
+    "refuel",           # 加油：走通用渲染但需要单独过仲裁
+    "game_end",         # 退出：收车小结
+    "ferry",            # 过境：学地名 + 介绍两端
+    "train",
+)})
+EVENT_ROUTES.update({name: ROUTE_CONTENT for name in (CONTENT_EVENTS | {"mountain_pass"})})
+
+
+def route_of(event_name: str) -> str:
+    """事件走哪条道（未登记的一律按常规处理）。"""
+    return EVENT_ROUTES.get(event_name, ROUTE_NORMAL)
+
 
 # 里程关口（原 SmallTalk 的里程碑表；现在只作为陪玩 milestone 维度的触发源）
 MILESTONE_KM = (100, 500, 1000, 2500, 5000, 10000, 25000, 50000,
@@ -670,9 +696,17 @@ class PawpilotRuntime:
                 snap = self._last_snap
                 if snap is None or not snap.sdk_active:
                     continue
+                # 统一的"陪聊密度"倍率：面板播报频率 × 玩法画像。
+                # 2026-10 修正：以前只有事件冷却和陪玩维度吃这个倍率，电台/途经地点/
+                # 识屏各用各的固定间隔 → 调「安静」并不会真的让整体安静下来。
+                st_play = self.playbook.classify(snap)
+                self._playstyle = st_play
+                chatter_mult = (BROADCAST_FREQUENCY_MULTIPLIERS.get(
+                    self.arbiter.broadcast_frequency, 1.0)
+                    * float(getattr(st_play, "gap_mult", 1.0) or 1.0))
                 # 里程碑：交给陪玩维度表统一调度（原先在这里单独插一条硬编码台词）
-                # 画面畅聊：OCR 采样（每 4 分钟一次）
-                if now - self._last_ocr_at >= self._ocr_interval:
+                # 画面畅聊：OCR 采样（基准 4 分钟，同样受陪聊密度影响）
+                if now - self._last_ocr_at >= self._ocr_interval * chatter_mult:
                     self._last_ocr_at = now
                     photo_ask, scene_topic = await self._ocr_scan()
                     if photo_ask:
@@ -705,7 +739,8 @@ class PawpilotRuntime:
                     place = self.places.passing(
                         snap.world_x, snap.world_z, now,
                         radius_km=float(getattr(self.cfg, "passing_radius_km", 6.0) or 6.0),
-                        cooldown_s=float(getattr(self.cfg, "passing_cooldown_s", 1800.0) or 1800.0),
+                        cooldown_s=(float(getattr(self.cfg, "passing_cooldown_s", 1800.0) or 1800.0)
+                                    * chatter_mult),
                     )
                     if place:
                         await self.push.push_fact(self._passing_place_fact(place),
@@ -719,7 +754,8 @@ class PawpilotRuntime:
                     weather = getattr(self, "_last_weather_hint", "")
                     brief = self.radio.pick(snap, now, driving_since=driving_since,
                                             station_hint=getattr(self, "_radio_station_hint", ""),
-                                            weather=weather)
+                                            weather=weather,
+                                            interval_mult=chatter_mult)
                     if brief:
                         await self.push.push_fact(brief, priority=CHAT, topic="radio")
                         continue
@@ -735,12 +771,7 @@ class PawpilotRuntime:
                 if now - getattr(self, "_last_push_at", 0.0) < quiet_s:
                     pass
                 else:
-                    # 玩法决定陪玩密度：市区配送/重载/赶时间更安静，观光/兜风更热闹
-                    st = self.playbook.classify(snap)
-                    self._playstyle = st
-                    gap_mul = (BROADCAST_FREQUENCY_MULTIPLIERS.get(
-                        self.arbiter.broadcast_frequency, 1.0)
-                        * float(getattr(st, "gap_mult", 1.0) or 1.0))
+                    gap_mul = chatter_mult          # 和上面几处用同一个倍率
                     cctx = self.companion.build_context(
                         snap,
                         drive_min=((now - self.proactive._drive_start_ts) / 60.0
@@ -761,7 +792,7 @@ class PawpilotRuntime:
                     cctx["milestone_km"] = self._milestone_km
                     fam = self.cargo_book.classify(getattr(snap, "cargo_id", ""),
                                                    getattr(snap, "cargo", ""))
-                    cctx["play_label"] = st.label
+                    cctx["play_label"] = st_play.label
                     cctx["play_advice"] = self.cargo_book.tip(
                         getattr(snap, "cargo_id", ""), getattr(snap, "cargo", ""))
                     cctx["cargo_family"] = (fam or {}).get("label", "")
@@ -769,7 +800,7 @@ class PawpilotRuntime:
                             if now < getattr(self, "_chat_bias_until", 0.0) else "")
                     if not bias:
                         # 没有刚发生的事时，按玩法倾向选话题（观光→风景、市区→进城…）
-                        bias = st.chat_bias
+                        bias = st_play.chat_bias
                     picked = self.companion.next_fact(
                         snap, cctx, now=now,
                         categories=self.arbiter.broadcast_categories,
@@ -1191,29 +1222,20 @@ class PawpilotRuntime:
                 if dst:
                     self.places.learn(dst, snap_p.world_x, snap_p.world_z, "ferry_station")
                 self._spawn(self.memory.save())
-            what = "渡轮" if ev.name == "ferry" else "火车"
-            self._spawn(self.push.push_fact(
-                f"[过境] 主人把车开上了{what}：{src or '起点'} → {dst or '终点'}。"
-                f"请以猫娘语气说一句（提一下这两地的地理位置/海峡或沿途风景，1-2 句）"))
+            # 事实行统一走 _render（模板在 FACT_TEMPLATES 里，不再是内联硬编码指令）
+            self._spawn(self.push.push_fact(self._render(ev), priority=IMPORTANT,
+                                            topic="transit"))
             return
-        if ev.name == "mountain_pass":
-            climb = ev.data.get("climb_m", 0)
-            alt = ev.data.get("altitude", 0)
-            up = ev.data.get("direction") == "up"
-            self._spawn(self.push.push_fact(
-                f"[地标] 正在{'爬坡上山' if up else '下坡'}：这段海拔变化 {climb:.0f} 米"
-                f"（当前海拔 {alt:.0f} 米）。请以猫娘语气提醒一句山路驾驶"
-                f"（连续弯道/长下坡用发动机制动等），1 句即可"))
-            return
+        # mountain_pass 已并入内容类路由（_render 里有对应事实行模板）
         # ── 内容类事件：不走仲裁，直接 respond ──────────────────────
         # 这些都是一次性/长间隔的真实内容（行程分段、距离锚点、交付时间、
         # 收费站、挂车），旧版和普通事件一样过仲裁 → 常被"场景门控"或
         # "限流单槽窗口"吞掉。实测主人反馈："任务分段播报、时间提醒从没响过"。
         # 它们本身频率极低（一次任务 3~4 条），直接放行不会刷屏。
-        if ev.name in CONTENT_EVENTS:
+        if route_of(ev.name) == ROUTE_CONTENT:
             prompt = self._render(ev)
             if prompt:
-                self._spawn(self.push.push_fact(prompt))
+                self._spawn(self.push.push_fact(prompt, priority=IMPORTANT))
             return
         if ev.name == "fine":
             self._set_bias("banter", 180.0)   # 刚吃罚单：允许她损你两句
@@ -1468,6 +1490,16 @@ class PawpilotRuntime:
             return self.emotion.fact_prompt(ev.name,
                                             km=round(d.get("remaining_km", 0)),
                                             mark=d.get("mark", 0))
+        if ev.name == "mountain_pass":
+            return self.emotion.fact_prompt(
+                ev.name, climb_m=ev.data.get("climb_m", 0),
+                altitude=ev.data.get("altitude", 0))
+        if ev.name == "ferry":
+            return self.emotion.fact_prompt(
+                ev.name, source=ev.data.get("source", ""), target=ev.data.get("target", ""))
+        if ev.name == "train":
+            return self.emotion.fact_prompt(
+                ev.name, source=ev.data.get("source", ""), target=ev.data.get("target", ""))
         if ev.name == "time_relaxed":
             return self.emotion.fact_prompt(ev.name, min=ev.data.get("min", 0))
         if ev.name == "time_tight":

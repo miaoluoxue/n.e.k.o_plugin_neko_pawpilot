@@ -33,18 +33,25 @@ class RadioDJ:
         self._last_segment_at = 0.0
         self._last_kind = ""
 
-    def due(self, now: float, driving_since: float = 0.0) -> bool:
-        """是否到该开一段的时间（间隔可配，默认 10 分钟；设 0 = 关闭电台）。"""
+    def due(self, now: float, driving_since: float = 0.0,
+            interval_mult: float = 1.0) -> bool:
+        """是否到该开一段的时间（间隔可配，默认 10 分钟；设 0 = 关闭电台）。
+
+        interval_mult 是统一的"陪聊密度"倍率（播报频率 × 玩法），
+        让面板上的「播报频率」真的能一并管住电台，而不只是管事件冷却。
+        """
         try:
             interval = float(getattr(self.cfg, "radio_interval_s", 600.0))
         except (TypeError, ValueError):
             interval = 600.0
         if interval <= 0:
             return False
+        interval *= max(0.1, float(interval_mult or 1.0))
         return (now - self._last_segment_at) >= interval
 
     def pick(self, snap: Any, now: float, driving_since: float = 0.0,
-             station_hint: str = "", weather: str = "") -> Optional[str]:
+             station_hint: str = "", weather: str = "",
+             interval_mult: float = 1.0) -> Optional[str]:
         """返回一段"节目单事实行"（供宿主 LLM 演绎）；不该播时返回 None。
 
         2026-10 修正：旧版要求 `snap.on_job`，于是**自由驾驶时电台一次都没播过**
@@ -55,7 +62,7 @@ class RadioDJ:
             return None
         if getattr(snap, "paused", False):
             return None
-        if not self.due(now, driving_since):
+        if not self.due(now, driving_since, interval_mult=interval_mult):
             return None
         hour = 12
         tmin = getattr(snap, "time_abs_min", None)
