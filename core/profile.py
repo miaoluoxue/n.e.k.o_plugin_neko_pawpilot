@@ -45,14 +45,15 @@ class DriverProfile:
         }
 
     def record_celebration(self, result: dict) -> Optional[str]:
-        """新纪录/连续无事故庆祝话术。"""
+        """新纪录/连续无事故 → **事实行**（措辞交宿主 LLM，不写死台词）。"""
         if result.get("new_record"):
-            return f"新纪录！单程 {result.get('record_km', 0):.0f} km 喵！你是公路之王！👑"
+            return (f"[纪录] 单程新纪录：{result.get('record_km', 0):.0f} km，"
+                    f"是他跑过最长的一趟")
         streak = result.get("safe_streak", 0)
         if streak >= 10:
-            return f"连续 {streak} 单无事故！安全驾驶标兵！🛡️"
+            return f"[纪录] 连续 {streak} 单零事故，可以夸一句"
         if streak == 5:
-            return f"连续 {streak} 单无事故了喵，继续保持！"
+            return f"[纪录] 连续 {streak} 单零事故"
         return None
 
     def label(self) -> str:

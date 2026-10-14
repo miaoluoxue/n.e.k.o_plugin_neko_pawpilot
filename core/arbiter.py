@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from .event_catalog import BROADCAST_FREQUENCY_MULTIPLIERS, spec
 from .safety_guard import SafetyGuard
 from .scenario import ScenarioMachine
-
-
-@dataclass(frozen=True)
-class ArbiterCheckpoint:
-    last_fired: dict[str, tuple[float, bool]]
 
 
 class Arbiter:
@@ -33,12 +27,6 @@ class Arbiter:
     def reset(self) -> None:
         self._last_fired.clear()
         self._window_best = None
-
-    def checkpoint(self) -> ArbiterCheckpoint:
-        return ArbiterCheckpoint(last_fired=dict(self._last_fired))
-
-    def restore(self, cp: ArbiterCheckpoint) -> None:
-        self._last_fired = dict(cp.last_fired)
 
     def on_player_speak(self, silence_s: float = 60.0) -> None:
         self._player_silence_until = time.time() + silence_s

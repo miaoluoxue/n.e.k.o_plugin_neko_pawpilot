@@ -84,7 +84,3 @@ EVENT_CATALOG: dict[str, EventSpec] = {
 def spec(event_id: str) -> EventSpec:
     """取事件规格；未知事件给保守默认。"""
     return EVENT_CATALOG.get(event_id, EventSpec(event_id, CAT_TRIP, 1, False, 30))
-
-
-def preempt_ids() -> frozenset[str]:
-    return frozenset(eid for eid, s in EVENT_CATALOG.items() if s.preempt)

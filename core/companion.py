@@ -204,8 +204,16 @@ def f_memory(snap, ctx) -> str:
         bits.append(f"完成 {ctx['trips']} 单")
     if ctx.get("top_city"):
         bits.append(f"跑得最多的城市是 {ctx['top_city']}")
+    today = ctx.get("diary_today") or {}
+    if today.get("trips"):
+        bits.append(f"今天已经跑了 {today['km']:.0f} km、{today['trips']} 单"
+                    f"（收入 {today['revenue']:.0f} €）")
+    last = ctx.get("diary_last") or {}
+    if last.get("dst"):
+        bits.append(f"上一趟是 {last.get('src') or '起点'} → {last['dst']}"
+                    f"（{last.get('cargo') or '货'}，{float(last.get('km', 0)):.0f} km）")
     if ctx.get("today_km"):
-        bits.append(f"今天已经跑了 {ctx['today_km']:.0f} km")
+        bits.append(f"本想提一下今天 {ctx['today_km']:.0f} km")
     return "；".join(bits)
 
 
@@ -484,18 +492,14 @@ class Companion:
         """
         return max(30.0, float(getattr(self.cfg, "companion_gap_s", 90.0) or 90.0))
 
-    def reset_cooldowns(self) -> None:
-        self._last.clear()
-        self._last_any = 0.0
-        self._last_dim = ""
-
     # ── 上下文 ──
     def build_context(self, snap, drive_min: float = 0.0, place: Any = None,
                       odometer_km: float = 0.0, trips: int = 0,
                       top_city: str = "", today_km: float = 0.0,
                       rain_confirmed: bool = False,
                       remark: str = "", mood: str = "",
-                      memory_hint: str = "") -> Dict[str, Any]:
+                      memory_hint: str = "", diary_today: Any = None,
+                      diary_last: Any = None, driving_by: str = "") -> Dict[str, Any]:
         """把快照 + 地图知识 + 情绪/记忆整理成维度可用的上下文（不含活对象）。"""
         ctx: Dict[str, Any] = {
             "clock": "",
@@ -516,6 +520,9 @@ class Companion:
             "mood": str(mood or ""),
             "memory_hint": str(memory_hint or ""),
             "milestone_km": 0.0,
+            "diary_today": dict(diary_today or {}),
+            "diary_last": dict(diary_last or {}),
+            "driving_by": str(driving_by or ""),
         }
         if getattr(snap, "time_abs_min", 0):
             h = (snap.time_abs_min // 60) % 24
@@ -613,6 +620,9 @@ class Companion:
             hint.append(f"当前情绪：{ctx['mood']}")
         if ctx.get("memory_hint"):
             hint.append(f"可以顺带提一句：{ctx['memory_hint']}")
+        if ctx.get("driving_by") == "catgirl":
+            # 智驾打通：她握着方向盘的时候，口吻要像司机而不是副驾
+            hint.append("现在方向盘在你（猫娘）手里，说话要像开车的人，别说成是你在旁边看着")
         if bias:
             hint.append("延续刚刚发生的事，别突然换到无关话题")
         return {"id": best.id, "label": best.label, "category": best.category,

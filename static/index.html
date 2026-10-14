@@ -246,6 +246,10 @@ body::before {
       <h2>🏆 成就里程碑 <span class="line"></span></h2>
       <div id="milestones" class="empty">还没有成就，继续跑吧喵</div>
     </div>
+    <div class="card">
+      <h2>📔 旅途日记 <span class="line"></span></h2>
+      <div class="act-list" id="diaryList"><div class="empty">还没有日记，跑完一单就有了喵</div></div>
+    </div>
   </div>
 
   <!-- 地图 -->
@@ -433,13 +437,16 @@ function renderMemory() {
   var s = state, counts = s.memory || {};
   var prof = s.profile || {}, pstats = prof.stats || {};
   var led = s.ledger || {};
+  var dc = s.diary || {}, dt = dc.today || {};
   document.getElementById('memoryGrid').innerHTML =
     statCard('城市足迹', counts.cities || 0) +
     statCard('货物偏好', counts.cargos || 0) +
     statCard('总里程', pstats.total_km !== undefined ? Math.round(pstats.total_km) + ' km' : '-', 'grad') +
     statCard('完成单数', pstats.trips || 0) +
     statCard('本月净赚', led.net !== undefined ? Math.round(led.net) + ' €' : '-', 'green') +
-    statCard('驾驶画像', prof.label || '-');
+    statCard('驾驶画像', prof.label || '-') +
+    statCard('今天里程', dt.km !== undefined ? Math.round(dt.km) + ' km' : '-') +
+    statCard('今天单数', dt.trips || 0, dt.trips ? 'green' : '');
   var cities = s.top_cities || [], cargos = s.top_cargos || [];
   document.getElementById('cityTags').innerHTML = cities.length
     ? cities.map(c => '<span class="tag">' + (c.key || '') + ' · ' + (c.count || 0) + ' 次</span>').join('')
@@ -451,6 +458,23 @@ function renderMemory() {
   if (ms) ms.innerHTML = (prof.milestones || []).length
     ? (prof.milestones || []).map(m => '<span class="tag">🏆 ' + m + '</span>').join('')
     : '<div class="empty">还没有成就，继续跑吧喵</div>';
+  // 旅途日记：把"跑过什么"写成能回味的记录
+  var diaryBox = document.getElementById('diaryList');
+  if (diaryBox) {
+    var rec = dc.recent || [];
+    diaryBox.innerHTML = rec.length ? rec.map(function (e) {
+      var route = (e.src || '?') + ' → ' + (e.dst || '?');
+      var extra = [];
+      if (e.km) extra.push(Math.round(e.km) + ' km');
+      if (e.cargo) extra.push(e.cargo);
+      if (e.revenue) extra.push(Math.round(e.revenue) + ' €');
+      if (e.crashes) extra.push('碰撞 ' + e.crashes + ' 次');
+      if (e.speedings) extra.push('超速 ' + e.speedings + ' 次');
+      return '<div class="act-item"><span class="act-mark t2"></span><div style="flex:1;min-width:0;">' +
+        '<div class="t">' + route + '</div><div class="d">' + extra.join(' · ') + '</div></div>' +
+        '<span class="time">' + (e.day || '') + '</span></div>';
+    }).join('') : '<div class="empty">还没有日记，跑完一单就有了喵</div>';
+  }
 }
 
 function renderMap() {

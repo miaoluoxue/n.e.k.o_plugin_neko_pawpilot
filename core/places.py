@@ -88,6 +88,3 @@ class PlaceBook:
             return None
         self._passed[name] = now
         return near
-
-    def remember_passed(self, name: str, now: float) -> None:
-        self._passed[(name or "").strip()] = now

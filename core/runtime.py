@@ -13,6 +13,7 @@ from ..adapters.telemetry_installer import TelemetryInstaller
 from .arbiter import Arbiter
 from .companion import Companion
 from .config_model import PawpilotConfig
+from .diary import TripDiary
 from .event_catalog import BROADCAST_FREQUENCY_MULTIPLIERS
 from .event_engine import EventEngine, TruckEvent
 from .knowledge import KnowledgeBase
@@ -114,6 +115,8 @@ class PawpilotRuntime:
         self.push = PushSender(plugin, dry_run=config.dry_run, on_push=self._note_push,
                                gap_chat=float(getattr(config, "companion_gap_s", 90.0) or 90.0))
         self.memory = MemoryStore(plugin.store, mirror_path=_memory_mirror_path(plugin))
+        # 旅途日记（故事层）：收车小结 / 回归问候 / 陪聊回忆 共用
+        self.diary = TripDiary(self.memory)
         self.recall = Recall(self.memory)
         self.ledger = Ledger(self.memory)
         self.trip_summary = TripSummary({})
@@ -467,6 +470,7 @@ class PawpilotRuntime:
                 "voice_labels": self.persona.snapshot().get("voice_labels", []),
             },
             "memory": self.memory.snapshot(),
+            "diary": self.diary.snapshot(top=5),
             "top_cities": self._top_entries("cities"),
             "top_cargos": self._top_entries("cargos"),
             "scenario": arb.get("scenario", "IDLE"),
@@ -736,6 +740,9 @@ class PawpilotRuntime:
                         remark=self.recall.recent_remark(),
                         mood=self.persona.mood.primary(),
                         memory_hint=self.recall.context_hint(top=2),
+                        diary_today=self.diary.today_summary(),
+                        diary_last=self.diary.last() or {},
+                        driving_by=("catgirl" if self.pilot.state == "engaged" else "user"),
                     )
                     cctx["milestone_km"] = self._milestone_km
                     bias = (self._chat_bias
@@ -1035,6 +1042,11 @@ class PawpilotRuntime:
             allowed, reason = self.arbiter.decide(ev.name, ev.snapshot)
             prompt = self._render(ev) if allowed else None
             if prompt:
+                # 退出游戏时补一段"今日收车小结"（今天真跑过才说）
+                if ev.name == "game_end":
+                    today = self.diary.render_today()
+                    if today:
+                        prompt = f"{prompt}\n{today}"
                 self._spawn(self.push.push_fact(prompt, priority=IMPORTANT))
             return
         if ev.name in ("ferry", "train"):
@@ -1203,6 +1215,11 @@ class PawpilotRuntime:
         }
         self.recall.on_trip_end(trip)
         self.ledger.record(trip)
+        # 故事层：写一条旅途日记（收车小结 / 回归问候 / 陪聊回忆都读它）
+        try:
+            self.diary.write(trip, note=getattr(self, "_last_weather_hint", ""))
+        except Exception as exc:            # noqa: BLE001
+            self.plugin.logger.warning("写日记失败: %s", exc)
         await self.memory.save()
         self._trip_start = None
         self._reset_trip_stats()
@@ -1242,8 +1259,13 @@ class PawpilotRuntime:
         celebration = self.profile.record_celebration(profile_result)
         if celebration:
             lines.append(celebration)
+        # 到达时顺手把"今天整体跑成什么样"提一句（收车小结的铺垫）
+        today = self.diary.today_summary()
+        if today["trips"] >= 2:
+            lines.append(f"今天累计已跑 {today['km']:.0f} km、{today['trips']} 单")
         await self.push.push_fact(
-            self.emotion.custom_fact("\n".join(lines), "job_delivered"))
+            self.emotion.custom_fact("\n".join(lines), "job_delivered"),
+            priority=IMPORTANT, topic="trip_summary")
 
     def _render(self, ev: TruckEvent) -> Optional[str]:
         s = ev.snapshot
@@ -1287,7 +1309,12 @@ class PawpilotRuntime:
         if ev.name == "low_fuel":
             return self.emotion.fact_prompt(ev.name, percent=ev.data.get("percent", 0))
         if ev.name == "game_start":
-            return self.emotion.fact_prompt(ev.name) + self._greeting()
+            # 回归问候：如果记忆里有"上次收车"，就接着上次说
+            back = self.diary.render_welcome_back()
+            base = self.emotion.fact_prompt(ev.name)
+            if back:
+                base = f"{base}\n{back}"
+            return base + self._greeting()
         if ev.name == "game_end":
             return self.emotion.fact_prompt(ev.name) + self._farewell()
         if ev.name == "trip_progress":

@@ -613,6 +613,74 @@ def test_companion_bias_prefers_related_dimension():
     assert biased["id"] == "life", biased["id"]                # 给了倾向就聊生活
 
 
+def test_trip_diary_closure_loop():
+    """陪伴闭环：日记 → 收车小结 → 第二天回归问候。"""
+    from plugin.plugins.neko_pawpilot.core.diary import TripDiary
+
+    store = MemoryStore(FakeStore())
+    d = TripDiary(store)
+    assert d.today_summary()["trips"] == 0
+    assert d.render_today() == ""            # 今天没跑过 → 不出声
+    assert d.render_welcome_back() == ""      # 没有历史 → 不硬编问候
+
+    d.write({"ts": 1_700_000_000, "src": "Milano", "dst": "Torino",
+             "cargo": "废金属", "distance_km": 188, "revenue": 9000,
+             "speedings": 2, "crashes": 0, "duration_min": 140},
+            note="雨天")
+    d.write({"ts": 1_700_000_600, "src": "Torino", "dst": "Genova",
+             "cargo": "机械", "distance_km": 160, "revenue": 7000,
+             "speedings": 0, "crashes": 1, "duration_min": 120})
+
+    s = d.today_summary()
+    assert s["trips"] == 2 and s["km"] == 348.0 and s["revenue"] == 16000
+    assert s["speedings"] == 2 and s["crashes"] == 1
+    assert set(s["cities"]) == {"Milano", "Torino", "Genova"}
+
+    today = d.render_today()
+    assert today.startswith("[今日收车]")
+    assert "348" in today and "2 单" in today and "超速 2 次" in today
+    assert "喵" not in today                  # 数据行，不是写死的台词
+
+    back = d.render_welcome_back()
+    assert back.startswith("[回归]") and "Genova" in back
+
+    snap = d.snapshot(top=5)
+    assert snap["count"] == 2
+    assert snap["recent"][0]["dst"] == "Genova"   # 最近的排最前
+
+
+def test_chatter_knows_who_is_driving():
+    """智驾打通：她握方向盘时，闲聊提示要说"像司机而不是副驾"。"""
+    from plugin.plugins.neko_pawpilot.core.companion import Companion
+
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.speed_mps = 60 / 3.6
+    s.speed_limit_mps = 90 / 3.6
+    s.time_abs_min = 12 * 60
+    s.fuel = 800.0
+    s.fuel_capacity = 1000.0
+    comp = Companion(_cfg())
+    cats = {"safety": True, "task": True, "trip": True,
+            "lifecycle": True, "chatter": True}
+    ctx_user = comp.build_context(s, driving_by="user")
+    got = None
+    for i in range(40):
+        got = comp.next_fact(s, ctx_user, now=1_000_000.0 + i * 200, categories=cats)
+        if got:
+            break
+    assert got is not None
+    assert "方向" not in (got.get("hint") or "")
+    comp2 = Companion(_cfg())
+    ctx_ai = comp2.build_context(s, driving_by="catgirl")
+    got2 = None
+    for i in range(40):
+        got2 = comp2.next_fact(s, ctx_ai, now=1_000_000.0 + i * 200, categories=cats)
+        if got2:
+            break
+    assert got2 and "方向盘在你" in (got2.get("hint") or "")
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 
