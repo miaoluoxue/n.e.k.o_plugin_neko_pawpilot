@@ -422,11 +422,12 @@ function renderDrive() {
     statCard('车辆', (live && s.truck) || '-', 'grad') +
     statCard('动力', !live ? '-' : (s.power_type === 'electric' ? '电动' : s.power_type === 'diesel' ? '柴油' : '-'));
 
-  document.getElementById('taskCargo').textContent = s.cargo || '-';
+  // 任务卡整卡按 on_job 收口：没接任务时不能显示 0%／100% 这种看着像真数据的值
+  document.getElementById('taskCargo').textContent = s.on_job ? (s.cargo || '-') : '-';
   document.getElementById('taskRoute').textContent = s.on_job ? (s.city_src || '-') + ' → ' + (s.city_dst || '-') : '无任务';
   document.getElementById('taskProgress').textContent = s.on_job ? Math.round(s.progress_percent || 0) + '%（剩 ' + Math.round(s.remaining_km || 0) + ' km）' : '-';
-  document.getElementById('taskDelivery').textContent = s.delivery_remaining_min != null ? s.delivery_remaining_min + ' 分钟' : '-';
-  document.getElementById('taskCargoDamage').textContent = s.cargo_damage !== undefined ? Math.round((1 - s.cargo_damage) * 100) + '%' : '-';
+  document.getElementById('taskDelivery').textContent = (s.on_job && s.delivery_remaining_min != null) ? s.delivery_remaining_min + ' 分钟' : '-';
+  document.getElementById('taskCargoDamage').textContent = (s.on_job && s.cargo_damage != null) ? Math.round((1 - s.cargo_damage) * 100) + '%' : '-';
 
   document.getElementById('mood').textContent = MOOD_LABELS[s.mood] || s.mood || '-';
   document.getElementById('mode').textContent = (s.catgirl || {}).name || '-';
