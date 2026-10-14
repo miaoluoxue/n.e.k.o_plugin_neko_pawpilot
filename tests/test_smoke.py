@@ -1036,6 +1036,95 @@ def test_push_timeline_records_decisions():
     assert len(recent) <= 20
 
 
+def test_angle_dedupe_and_pacing_config():
+    """角度去重（换着花样说）+ 面板可改节奏配置（白名单）。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.core.companion import (
+        RECENT_ANGLE_MEMORY,
+        Companion,
+    )
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    # ① 角度去重：连说多轮，最近窗口内的说法不该立刻重复
+    comp = Companion(_cfg())
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.speed_mps = 70 / 3.6
+    s.speed_limit_mps = 90 / 3.6
+    s.time_abs_min = 12 * 60
+    s.fuel = 800.0
+    s.fuel_capacity = 1000.0
+    s.map_scale = 19.0
+    cats = {"safety": True, "task": True, "trip": True,
+            "lifecycle": True, "chatter": True}
+    angles = []
+    now = 1_000_000.0
+    for _ in range(14):
+        ctx = comp.build_context(s)
+        got = None
+        for _ in range(30):
+            got = comp.next_fact(s, ctx, now=now, categories=cats)
+            now += 120
+            if got:
+                break
+        if not got:
+            break
+        line = [ln for ln in got["fact"].splitlines() if "角度" in ln]
+        if line:
+            angles.append(line[0])
+    assert len(angles) >= 6
+    # 相邻两次不重复；整个序列里重复率也很低
+    assert all(angles[i] != angles[i + 1] for i in range(len(angles) - 1))
+    assert len(set(angles)) >= min(RECENT_ANGLE_MEMORY, len(angles))
+
+    # ② 节奏配置：白名单 + 类型转换 + 非法键被忽略
+    class _Logger:
+        def info(self, *a, **k):
+            pass
+
+        def warning(self, *a, **k):
+            pass
+
+    tmp = pathlib.Path(__file__).parent / ".tmp_pacing_test"
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    class _Plug(FakePlugin):
+        def __init__(self):
+            super().__init__(tmp)
+            self.store = HostLikeStore()
+            self.logger = _Logger()
+
+        def data_path(self, *a):
+            return tmp.joinpath(*a)
+
+    try:
+        rt = PawpilotRuntime(_Plug(), _cfg())
+        state = rt.pacing_state()
+        assert "companion_gap_s" in state and "content_radio_dj" in state
+        res = rt.set_pacing({
+            "companion_gap_s": "120",          # 字符串也能转
+            "radio_interval_s": 0,             # 0 = 关电台
+            "content_radio_dj": "false",       # 字符串布尔
+            "companion_enabled": 1,
+            "not_a_real_key": 999,             # 白名单外 → 忽略
+        })
+        assert res["applied"]["companion_gap_s"] == 120.0
+        assert res["applied"]["radio_interval_s"] == 0.0
+        assert res["applied"]["content_radio_dj"] is False
+        assert res["applied"]["companion_enabled"] is True
+        assert "not_a_real_key" not in res["applied"]
+        assert rt.cfg.companion_gap_s == 120.0
+        # 落盘后可被 settings_load 读回
+        asyncio.run(rt.settings_save())
+        rt2 = PawpilotRuntime(_Plug(), _cfg())
+        asyncio.run(rt2.settings_load())
+        assert rt2.cfg.companion_gap_s == 120.0
+        assert rt2.cfg.content_radio_dj is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 

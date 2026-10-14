@@ -118,6 +118,15 @@ MILESTONE_KM = (100, 500, 1000, 2500, 5000, 10000, 25000, 50000,
                 100000, 200000, 400000, 600000, 1000000)
 
 
+def _as_bool(value: Any) -> bool:
+    """面板传来的开关值可能是 bool / "true" / 0，统一成 bool。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "开", "是")
+
+
 def _memory_mirror_path(plugin: Any) -> Optional[str]:
     """记忆的本地 JSON 兜底路径（宿主 store 出问题时还能救回来）。"""
     try:
@@ -273,6 +282,41 @@ class PawpilotRuntime:
         except (OSError, json.JSONDecodeError):
             return {}
 
+    # ── 面板可调的节奏/内容配置（白名单，防止面板乱写配置）──
+    _PACING_KEYS = {
+        "companion_gap_s": float,           # 陪聊基准间隔（秒）
+        "companion_event_quiet_s": float,   # 事件之后让路多久（秒）
+        "radio_interval_s": float,          # 电台间隔（秒，0=关）
+        "passing_radius_km": float,         # 途经地名判定半径
+        "passing_cooldown_s": float,        # 同一地点播报冷却
+        "companion_enabled": bool,          # 陪玩总开关
+        "content_passing_places": bool,
+        "content_radio_dj": bool,
+        "content_opening_story": bool,
+        "content_arrival_culture": bool,
+    }
+
+    def pacing_state(self) -> Dict[str, Any]:
+        """当前节奏/内容配置（供面板显示）。"""
+        return {k: getattr(self.cfg, k, None) for k in self._PACING_KEYS}
+
+    def set_pacing(self, values: Dict[str, Any]) -> Dict[str, Any]:
+        """面板改配置：只认白名单里的键，类型按声明强制转换。"""
+        applied: Dict[str, Any] = {}
+        for key, value in (values or {}).items():
+            caster = self._PACING_KEYS.get(key)
+            if caster is None:
+                continue
+            try:
+                applied[key] = caster(value) if caster is not bool else _as_bool(value)
+            except (TypeError, ValueError):
+                continue
+        for key, value in applied.items():
+            setattr(self.cfg, key, value)
+        if applied:
+            self.plugin.logger.info("[配置] 面板调整：%s", applied)
+        return {"applied": applied, "state": self.pacing_state()}
+
     async def settings_save(self) -> None:
         """持久化面板可调设置到 data/config/ui_settings.json（原子写）。"""
         import json
@@ -283,6 +327,7 @@ class PawpilotRuntime:
             "voice_styles": list(self.persona.voice_styles),
             "broadcast_frequency": self.arbiter.broadcast_frequency,
             "broadcast_categories": dict(self.arbiter.broadcast_categories),
+            "pacing": self.pacing_state(),      # 节奏/内容配置（设置页可调）
         })
         path = self._ui_settings_path()
         tmp = path.with_suffix(".json.tmp")
@@ -318,6 +363,9 @@ class PawpilotRuntime:
             for k in self.arbiter.broadcast_categories:
                 if k in cats:
                     self.arbiter.broadcast_categories[k] = bool(cats[k])
+        pacing = saved.get("pacing")
+        if isinstance(pacing, dict):
+            self.set_pacing(pacing)          # 节奏/内容配置（白名单 + 类型转换）
 
     def _load_ocr_regions(self) -> dict:
         import json

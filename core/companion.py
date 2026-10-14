@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from .vehicle import trailer_config
+
+# 最近说过的角度记忆长度：21 个维度共享一个窗口，保证"换着花样说"
+RECENT_ANGLE_MEMORY = 14
 
 
 @dataclass(frozen=True)
@@ -517,6 +521,8 @@ class Companion:
         self._last_dim = ""
         self._angle: Dict[str, int] = {}
         self._rng = random.Random()
+        # 最近说过的角度（跨维度共享）：避免"同一个说法"隔几次又冒出来
+        self._recent_angles: Deque[str] = deque(maxlen=RECENT_ANGLE_MEMORY)
 
     # ── 调参 ──
     @property
@@ -651,12 +657,13 @@ class Companion:
             return None
 
         idx = self._angle.get(best.id, 0)
+        angle = self._pick_angle(best, idx)
         self._angle[best.id] = idx + 1
         self._last[best.id] = now
         self._last_any = now
         self._last_dim = best.id
         fact = (f"[陪玩·{best.label}] {facts}。\n"
-                f"（这次想聊的角度：{best.angle(idx)}）{_REQUIREMENT}")
+                f"（这次想聊的角度：{angle}）{_REQUIREMENT}")
         hint = []
         if ctx.get("mood_tone"):
             hint.append(ctx["mood_tone"])          # 情绪主线：所有维度共用的语气底
@@ -671,6 +678,25 @@ class Companion:
             hint.append("延续刚刚发生的事，别突然换到无关话题")
         return {"id": best.id, "label": best.label, "category": best.category,
                 "fact": fact, "hint": "；".join(hint)}
+
+    def _pick_angle(self, dim: "Dimension", idx: int) -> str:
+        """挑一个"最近没说过"的角度。
+
+        旧版是纯递增下标（4 个角度 → 每 4 次就原样重复一遍），
+        聊久了玩家就会听到同一句话。现在跨维度共享一个最近窗口，
+        挑角度时跳过窗口内的说法，实在绕不开才复用。
+        """
+        n = len(dim.angles)
+        if n == 0:
+            return "随口聊一句"
+        for k in range(n):
+            cand = dim.angle(idx + k)
+            if cand not in self._recent_angles:
+                self._recent_angles.append(cand)
+                return cand
+        cand = dim.angle(idx)               # 全都刚说过 → 只能复用
+        self._recent_angles.append(cand)
+        return cand
 
     def snapshot(self) -> Dict[str, Any]:
         return {

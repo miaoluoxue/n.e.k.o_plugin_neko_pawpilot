@@ -198,6 +198,40 @@ class NekoPawpilotPlugin(NekoPluginBase):
             return Err(SdkError("交还驾驶失败喵"))
 
     @plugin_entry(
+        id="set_pacing",
+        name="陪玩节奏配置",
+        description="面板改陪玩节奏与内容开关（陪聊间隔/电台间隔/途经半径/内容开关等），会持久化。",
+        input_schema={"type": "object", "properties": {
+            "values": {"type": "object", "description": "要改的键值对（白名单）"}}},
+    )
+    async def entry_set_pacing(self, values: dict = None, **_) -> Any:
+        """面板改配置：白名单 + 类型转换 + 落盘。"""
+        try:
+            if not self.rt:
+                return Err(SdkError("猫爪副驾还没准备好喵"))
+            result = self.rt.set_pacing(values or {})
+            await self.rt.settings_save()
+            return Ok(result)
+        except Exception as exc:
+            self.logger.warning("set_pacing failed: %s", exc)
+            return Err(SdkError("保存节奏配置失败喵"))
+
+    @plugin_entry(
+        id="get_pacing",
+        name="读取陪玩节奏配置",
+        description="读当前陪玩节奏与内容开关（面板显示用）。",
+        input_schema={"type": "object", "properties": {}},
+    )
+    async def entry_get_pacing(self, **_) -> Any:
+        try:
+            if not self.rt:
+                return Err(SdkError("猫爪副驾还没准备好喵"))
+            return Ok({"state": self.rt.pacing_state()})
+        except Exception as exc:
+            self.logger.warning("get_pacing failed: %s", exc)
+            return Err(SdkError("读取节奏配置失败喵"))
+
+    @plugin_entry(
         id="diagnose",
         name="自检",
         description="逐个试一遍各子系统（遥测/地图/记忆/识屏/播报/陪玩）到底能不能用，返回体检表。面板上也有按钮。",

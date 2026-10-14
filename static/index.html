@@ -306,6 +306,14 @@ body::before {
       <div style="color:var(--text3);font-size:0.72rem;margin-top:11px;">关掉哪一类就不再说那一类；「陪聊」管路况/进城/夜路/生活闲聊等十几个维度（危急驾驶安全始终保留）。</div>
     </div>
     <div class="card">
+      <h2>🎛 陪玩节奏 <span class="line"></span></h2>
+      <div style="color:var(--text3);font-size:0.72rem;margin-bottom:8px;">陪聊间隔 / 电台间隔 / 途经地名半径 —— 改完点保存，重启也生效。</div>
+      <div id="pacingForm"></div>
+      <div class="btn-group" style="margin-top:10px;">
+        <button class="btn btn-accent" onclick="savePacing()">💾 保存节奏配置</button>
+      </div>
+    </div>
+    <div class="card">
       <h2>🤖 LLM 配置 <span class="line"></span></h2>
       <div style="color:var(--text3);font-size:0.72rem;margin-bottom:8px;" id="llmStatus">未配置（自动用模板/宿主演绎）</div>
       <div class="config-field"><label>Provider</label>
@@ -603,6 +611,67 @@ function renderSettings() {
   document.getElementById('catGroup').innerHTML = Object.keys(cats).map(c =>
     '<button class="mode-chip' + (cats[c] ? ' active' : '') + '" onclick="toggleCategory(\'' + c + '\',' + cats[c] + ')">' + (CAT_LABELS[c] || c) + '</button>').join('');
   loadLlmForm();
+  loadPacingForm();
+}
+
+var PACING_FIELDS = [
+  { k:'companion_gap_s', t:'陪聊基准间隔', u:'秒', min:30, max:600, i:15 },
+  { k:'companion_event_quiet_s', t:'事件后让路', u:'秒', min:0, max:180, i:15 },
+  { k:'radio_interval_s', t:'电台间隔', u:'秒（0=关）', min:0, max:3600, i:60 },
+  { k:'passing_radius_km', t:'途经地名半径', u:'km', min:1, max:20, i:1 },
+  { k:'passing_cooldown_s', t:'同地点播报冷却', u:'秒', min:300, max:7200, i:300 },
+];
+var PACING_TOGGLES = [
+  { k:'companion_enabled', t:'陪玩总开关' },
+  { k:'content_opening_story', t:'接单开场故事' },
+  { k:'content_arrival_culture', t:'到达地文化介绍' },
+  { k:'content_passing_places', t:'途经地名介绍' },
+  { k:'content_radio_dj', t:'猫娘电台' },
+];
+
+function loadPacingForm() {
+  callEntry('get_pacing', {}).then(function (r) {
+    var st = (r && r.state) || {};
+    var box = document.getElementById('pacingForm');
+    if (!box) return;
+    box.innerHTML = PACING_FIELDS.map(function (f) {
+      var v = st[f.k];
+      return '<div class="row"><span class="k">' + f.t + '</span><span class="v">' +
+        '<input id="pc-' + f.k + '" type="number" step="' + f.i + '" min="' + f.min +
+        '" max="' + f.max + '" value="' + (v === undefined || v === null ? '' : v) +
+        '" style="width:90px;padding:5px;border-radius:6px;border:1px solid var(--border);' +
+        'background:var(--glass);color:var(--text);"> <span style="color:var(--text3);font-size:0.7rem;">' +
+        f.u + '</span></span></div>';
+    }).join('') + PACING_TOGGLES.map(function (f) {
+      var on = !!st[f.k];
+      return '<div class="row"><span class="k">' + f.t + '</span><span class="v">' +
+        '<button class="mode-chip' + (on ? ' active' : '') + '" id="pt-' + f.k +
+        '" onclick="togglePacing(\'' + f.k + '\')">' + (on ? '开' : '关') + '</button></span></div>';
+    }).join('');
+  }).catch(function () {});
+}
+
+function togglePacing(key) {
+  var b = document.getElementById('pt-' + key);
+  if (!b) return;
+  var on = !b.classList.contains('active');
+  b.classList.toggle('active', on);
+  b.textContent = on ? '开' : '关';
+}
+
+async function savePacing() {
+  var values = {};
+  PACING_FIELDS.forEach(function (f) {
+    var el = document.getElementById('pc-' + f.k);
+    if (el && el.value !== '') values[f.k] = parseFloat(el.value);
+  });
+  PACING_TOGGLES.forEach(function (f) {
+    var b = document.getElementById('pt-' + f.k);
+    if (b) values[f.k] = b.classList.contains('active');
+  });
+  var r = await callEntry('set_pacing', { values: values });
+  toast(r && r.applied ? '节奏配置已保存' : '没有可保存的改动或保存失败', !(r && r.applied));
+  setTimeout(loadState, 600);
 }
 
 function loadLlmForm() {
