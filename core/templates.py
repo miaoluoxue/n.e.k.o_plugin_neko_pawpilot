@@ -53,6 +53,8 @@ FACT_TEMPLATES = {
     "engine_stalled": "行驶中发动机熄火了（车速 {speed:.0f} km/h）",
     "high_beam_on": "远光灯已经开了超过半分钟（车速 {speed:.0f} km/h）",
     "blinker_forgotten": "{side}转向灯一直亮着没关（车速 {speed:.0f} km/h）",
+    "rested": "休息时间从原来的 {before_min:.0f} 分钟变回 {after_min:.0f} 分钟"
+              "（睡了约 {slept_h:.1f} 小时）",
 }
 
 # blind 模式的短句兜底（仅当直出时才用）

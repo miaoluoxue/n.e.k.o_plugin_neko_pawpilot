@@ -78,6 +78,8 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "battery_low":       EventSpec("battery_low", CAT_SAFETY, 5, False, 600),
     "high_beam_on":      EventSpec("high_beam_on", CAT_TRIP, 3, False, 600),
     "blinker_forgotten": EventSpec("blinker_forgotten", CAT_TRIP, 3, False, 300),
+    # 休息/睡觉（ETS2 真实机制：睡一觉会把强制休息倒计时顶回去）
+    "rested":            EventSpec("rested", CAT_TRIP, 4, False, 600),
 }
 
 

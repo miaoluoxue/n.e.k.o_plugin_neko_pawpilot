@@ -1053,6 +1053,19 @@ class PawpilotRuntime:
             # 到货只发一条：结算数据行（交宿主 LLM 收尾）。
             # 旧版还额外盲推一句写死的"到站检查"话术，和总结叠在一起像复读。
             snap_d = ev.snapshot
+            # 城市打卡：用地点簿的真实到访次数判断"第一次来"还是"第 N 次"
+            visits = self.places.query_visits(snap_d.city_dst) if snap_d.city_dst else 0
+            if snap_d.city_dst and visits == 0:
+                self._spawn(self.push.push_fact(
+                    self.emotion.custom_fact(
+                        f"[打卡] 第一次把货送到 {snap_d.city_dst}，这个城市是新地图",
+                        "job_delivered"), priority=CHAT, topic="city_first"))
+            elif snap_d.city_dst and visits >= 3:
+                self._spawn(self.push.push_fact(
+                    self.emotion.custom_fact(
+                        f"[打卡] {snap_d.city_dst} 已经是第 {visits + 1} 次来了，"
+                        f"这地方快成老朋友了", "job_delivered"),
+                    priority=CHAT, topic="city_repeat"))
             if snap_d.city_dst:
                 self.places.learn(snap_d.city_dst, snap_d.world_x, snap_d.world_z, "city")
                 self._spawn(self.memory.save())
@@ -1293,6 +1306,10 @@ class PawpilotRuntime:
         today = self.diary.today_summary()
         if today["trips"] >= 2:
             lines.append(f"今天累计已跑 {today['km']:.0f} km、{today['trips']} 单")
+        # 油耗风格反馈（真实对比：这趟 vs 历史均值）
+        verdict = self.profile.fuel_verdict(trip.get("fuel_avg", 0))
+        if verdict:
+            lines.append(verdict)
         await self.push.push_fact(
             self.emotion.custom_fact("\n".join(lines), "job_delivered"),
             priority=IMPORTANT, topic="trip_summary")
@@ -1398,7 +1415,7 @@ class PawpilotRuntime:
         if ev.name in ("adblue_low", "battery_low",
                        "lights_off_night", "park_brake_moving", "wheels_airborne",
                        "engine_stalled", "high_beam_on", "blinker_forgotten",
-                       "engine_warning", "overheat"):
+                       "engine_warning", "overheat", "rested"):
             kw = dict(ev.data)
             kw.setdefault("speed", s.speed_kmh)
             return self.emotion.fact_prompt(ev.name, **kw)

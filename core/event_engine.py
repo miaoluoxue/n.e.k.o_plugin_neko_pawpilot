@@ -476,6 +476,14 @@ class EventEngine:
         if speed > 5 and s.park_brake:
             fire("park_brake_moving", {"speed": speed})
 
+        # ①b 休息/睡觉：ETS2 的强制休息倒计时在睡觉后会被顶回去很多，
+        #     所以"倒计时突然变长"就是真实信号（不看就没有别的办法知道玩家睡了）
+        cur_rest = float(getattr(s, "rest_stop_min", 0) or 0)
+        prev_rest = float(getattr(prev, "rest_stop_min", 0) or 0) if prev else 0.0
+        if prev_rest > 0 and cur_rest > prev_rest + 180:
+            fire("rested", {"before_min": prev_rest, "after_min": cur_rest,
+                            "slept_h": (cur_rest - prev_rest) / 60.0})
+
         # ② 轮胎离地/翻滚：truck_wheelOnGround 是 16 槽数组，"0 个着地"只有在
         #    伴随强冲击时才可信（否则可能是该车型没填这个数组）——所以和加速度挂钩，
         #    只在真出事时播，不会因为拿不到数据就乱喊

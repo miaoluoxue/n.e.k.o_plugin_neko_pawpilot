@@ -802,6 +802,60 @@ def test_vehicle_parts_and_trailer_config():
     assert pb.classify(s).key != "multi_trailer"
 
 
+def test_rest_sleep_and_fuel_style_and_city_checkin():
+    """三个真实系统：睡觉侦测、油耗风格对比、城市打卡。"""
+    from plugin.plugins.neko_pawpilot.core.event_engine import EventEngine
+
+    # ① 睡觉：强制休息倒计时被顶回去 = 玩家睡了（ETS2 真实机制）
+    eng = EventEngine(_cfg())
+
+    def snap(rest, speed=0):
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.rest_stop_min = rest
+        s.speed_mps = speed / 3.6
+        return s
+
+    def run(cur, prev, now=1.0):
+        out = []
+        eng._check_vehicle(cur, prev, now, out)
+        return [e.name for e in out]
+
+    assert "rested" in run(snap(600), snap(120))              # 顶回去 480 分钟 → 睡了
+    assert "rested" in run(snap(660), snap(60))
+    # 只是缓慢消耗（正常开车倒计时减少）不该报
+    assert "rested" not in run(snap(50), snap(60))
+    # 没有上一帧 / 倒计时本来为 0（换任务）也不报
+    assert "rested" not in run(snap(660), None)
+    assert "rested" not in run(snap(660), snap(0))
+
+    # ② 油耗风格：这趟 vs 历史均值（遥测单位 L/100km）
+    store = MemoryStore(FakeStore())
+    prof = DriverProfile(store)
+    assert prof.avg_fuel() == 0.0
+    assert prof.fuel_verdict(30.0) == ""          # 没基准不硬评
+    for _ in range(3):
+        prof.record({"distance_km": 200, "fuel_avg": 30.0})
+    assert abs(prof.avg_fuel() - 30.0) < 0.01
+    assert "省了" in prof.fuel_verdict(27.5)
+    assert "高了" in prof.fuel_verdict(33.0)
+    assert "差不多" in prof.fuel_verdict(30.4)
+    assert prof.fuel_verdict(0) == ""             # 没读数不评
+    prof.record({"distance_km": 200, "fuel_avg": 9999.0})   # 异常值不计入
+    assert abs(prof.avg_fuel() - 30.0) < 0.01
+
+    # ③ 城市打卡：地点簿的到访次数就是"第几次来"
+    from plugin.plugins.neko_pawpilot.core.places import PlaceBook
+
+    book = PlaceBook(MemoryStore(FakeStore()))
+    assert book.query_visits("Torino") == 0       # 第一次来 → 打卡"新地图"
+    book.learn("Torino", 100.0, 200.0)
+    assert book.query_visits("Torino") == 1
+    book.learn("Torino", 100.0, 200.0)
+    book.learn("Torino", 100.0, 200.0)
+    assert book.query_visits("Torino") == 3       # 第 4 次来 → "老朋友"
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 
