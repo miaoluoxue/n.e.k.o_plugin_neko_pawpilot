@@ -169,17 +169,17 @@ class Proactive:
         return f"前方 {dist:.1f} km 有服务区，这单还剩 {remaining:.0f} km，中途休息一下喵~"
 
     def weather_propose(self, ocr_text: str, now: float | None = None) -> Optional[str]:
-        """OCR 检测到雨/雪 → 天气提醒（每 10 分钟一次）。"""
+        """OCR 检测到雨/雪 → 天气事实行（每 10 分钟一次，措辞交宿主）。"""
         now = now or time.time()
         if not ocr_text:
             return None
         text = ocr_text.lower()
         if ("rain" in text or "雨" in text) and now - self._last_propose.get("rain", 0) > 600:
             self._last_propose["rain"] = now
-            return "下雨路滑喵，慢点开，刹车留足距离~"
+            return "[天气] 画面/屏幕上确认在下雨，路面是湿的；提醒路滑、刹车距离变长"
         if ("snow" in text or "雪" in text) and now - self._last_propose.get("snow", 0) > 600:
             self._last_propose["snow"] = now
-            return "下雪了喵！路面结冰，千万别急刹！"
+            return "[天气] 画面/屏幕上确认在下雪、路面可能结冰；提醒千万别急刹"
         return None
 
     @staticmethod

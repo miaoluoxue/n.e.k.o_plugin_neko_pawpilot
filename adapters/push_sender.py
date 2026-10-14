@@ -32,7 +32,8 @@ class PushSender:
 
     def __init__(self, plugin: Any, dry_run: bool = True, on_push: Any = None,
                  gap_important: float = 6.0, gap_chat: float = 45.0,
-                 mute_after_critical: float = 60.0, queue_max: int = 8) -> None:
+                 mute_after_critical: float = 60.0, queue_max: int = 8,
+                 topic_gap: float = 300.0) -> None:
         self.plugin = plugin
         self.dry_run = dry_run
         self._on_push = on_push
@@ -40,10 +41,31 @@ class PushSender:
         self.gap_chat = gap_chat
         self.mute_after_critical = mute_after_critical
         self.queue_max = max(1, int(queue_max))
+        self.topic_gap = max(0.0, float(topic_gap))
         self._queue: List[Dict[str, Any]] = []
         self._last_sent = 0.0
         self._chat_mute_until = 0.0
+        self._topic_last: Dict[str, float] = {}
         self.dropped = 0
+
+    # ── 跨模块话题去重 ──
+    # 电台、途经地点、陪玩维度、画面识景分属不同模块，很容易各说一遍同一件事
+    # （比如"这段路风景真好"被 scenery / 电台 / 识屏各说一次）。所以每个模块
+    # 给自己说的话打个 topic，同一个 topic 在 topic_gap 内只放行一次。
+    def topic_blocked(self, topic: str, now: Optional[float] = None) -> bool:
+        if not topic or self.topic_gap <= 0:
+            return False
+        now = now or time.time()
+        return (now - self._topic_last.get(topic, -1e9)) < self.topic_gap
+
+    def mark_topic(self, topic: str, now: Optional[float] = None) -> None:
+        if topic:
+            self._topic_last[topic] = now or time.time()
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {"pending": len(self._queue), "dropped": self.dropped,
+                "chat_mute_s": max(0.0, round(self._chat_mute_until - time.time())),
+                "topics": len(self._topic_last)}
 
     # ── 日志/回调 ──
     def _log(self, level: str, msg: str, *args: Any) -> None:
@@ -79,10 +101,10 @@ class PushSender:
         return len(self._queue)
 
     def _enqueue(self, text: str, kind: str, priority: str, ttl: float,
-                 lanlan: str = "") -> None:
+                 lanlan: str = "", topic: str = "") -> None:
         self._queue.append({"text": text, "kind": kind, "priority": priority,
                             "ts": time.time(), "ttl": max(10.0, ttl),
-                            "lanlan": lanlan})
+                            "lanlan": lanlan, "topic": topic})
         # 队列按 (优先级, 入队时间) 排序，超额时丢最不重要的最旧项
         self._queue.sort(key=lambda q: (_ORDER.get(q["priority"], 9), q["ts"]))
         if len(self._queue) > self.queue_max:
@@ -118,19 +140,29 @@ class PushSender:
 
     # ── 对外接口 ──
     async def say(self, text: str, priority: str = IMPORTANT, kind: str = "respond",
-                  ttl: float = 240.0, lanlan: str = "") -> bool:
-        """统一入口：按优先级决定立刻发还是排队。"""
+                  ttl: float = 240.0, lanlan: str = "", topic: str = "") -> bool:
+        """统一入口：按优先级决定立刻发还是排队；topic 用于跨模块去重。"""
         now = time.time()
+        if topic and priority != CRITICAL and self.topic_blocked(topic, now):
+            self.dropped += 1
+            self._log("info", "[推送·去重] topic=%s 已说过，本轮跳过", topic)
+            return False
         if priority == CRITICAL:
             # 紧急先走：丢掉排队的闲聊，并让闲聊安静一会儿
             self._queue = [q for q in self._queue if q["priority"] != CHAT]
             self._chat_mute_until = now + self.mute_after_critical
-            return await self._transmit(text, kind, priority, lanlan)
+            ok = await self._transmit(text, kind, priority, lanlan)
+            if ok:
+                self.mark_topic(topic, now)
+            return ok
         if priority == CHAT and now < self._chat_mute_until:
             return False                     # 紧急善后期，闲聊不插嘴
         if self.lane_free(priority, now) and not self._queue:
-            return await self._transmit(text, kind, priority, lanlan)
-        self._enqueue(text, kind, priority, ttl, lanlan)
+            ok = await self._transmit(text, kind, priority, lanlan)
+            if ok:
+                self.mark_topic(topic, now)
+            return ok
+        self._enqueue(text, kind, priority, ttl, lanlan, topic)
         return False
 
     async def drain(self) -> bool:
@@ -143,23 +175,32 @@ class PushSender:
         head = self._queue[0]
         if not self.lane_free(head["priority"], now):
             return False
+        if self.topic_blocked(head.get("topic", ""), now):
+            self._queue.pop(0)
+            self.dropped += 1
+            return False
         self._queue.pop(0)
-        return await self._transmit(head["text"], head["kind"], head["priority"],
-                                    head.get("lanlan", ""))
+        ok = await self._transmit(head["text"], head["kind"], head["priority"],
+                                  head.get("lanlan", ""))
+        if ok:
+            self.mark_topic(head.get("topic", ""), now)
+        return ok
 
     async def push_fact(self, fact: str, target_lanlan: str = "",
-                        priority: str = IMPORTANT, ttl: float = 240.0) -> bool:
+                        priority: str = IMPORTANT, ttl: float = 240.0,
+                        topic: str = "") -> bool:
         """respond 模式：事实交给宿主，由当前人设决定措辞。"""
         return await self.say(fact, priority=priority, kind="respond",
-                              ttl=ttl, lanlan=target_lanlan)
+                              ttl=ttl, lanlan=target_lanlan, topic=topic)
 
     async def push_direct(self, text: str, priority: str = CHAT,
-                          ttl: float = 240.0) -> bool:
+                          ttl: float = 240.0, topic: str = "") -> bool:
         """blind 模式：直出聊天气泡，不触发语音。
 
         默认按闲聊走队列——这类"存在感话术/硬编码短句"本质上都是陪聊内容。
         """
-        return await self.say(text, priority=priority, kind="blind", ttl=ttl)
+        return await self.say(text, priority=priority, kind="blind", ttl=ttl,
+                              topic=topic)
 
     async def push_image(self, image_bytes: bytes, caption: str = "") -> bool:
         """落盘图片到 data/static/cards/ 并以 markdown 直出。"""

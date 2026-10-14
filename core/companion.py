@@ -242,6 +242,18 @@ def f_remark(snap, ctx) -> str:
     return "；".join(bits)
 
 
+def f_milestone(snap, ctx) -> str:
+    """里程里程碑（原 SmallTalk 的唯一在用功能，2026-10 并入陪玩维度表）。"""
+    bits = [f"总里程刚越过 {ctx.get('milestone_km', 0):.0f} km 这个整数关口"]
+    if ctx.get("odometer_km"):
+        bits.append(f"当前总里程 {ctx['odometer_km']:.0f} km")
+    if ctx.get("trips"):
+        bits.append(f"累计完成 {ctx['trips']} 单")
+    if snap.on_job and snap.city_dst:
+        bits.append(f"正在往 {snap.city_dst} 跑")
+    return "；".join(bits)
+
+
 def f_banter(snap, ctx) -> str:
     bits = [f"车速 {snap.speed_kmh:.0f} km/h"]
     if snap.speed_limit_kmh:
@@ -406,6 +418,14 @@ DIMENSIONS: Tuple[Dimension, ...] = (
         f_banter,
     ),
     Dimension(
+        "milestone", "里程碑", "chatter", 600, 6,
+        ("为这个关口高兴一下，顺带说说跑了多久",
+         "纪念一下这个数字，提一句你们一起跑过的路",
+         "恭喜他，并定一个小目标"),
+        lambda s, c: bool(c.get("milestone_km")),
+        f_milestone,
+    ),
+    Dimension(
         "remark", "记得你说过", "chatter", 1200, 5,
         ("自然地把这句话接回来，像一直记着的样子",
          "就这句话回一句关心或调侃（别生硬复述）",
@@ -474,8 +494,9 @@ class Companion:
                       odometer_km: float = 0.0, trips: int = 0,
                       top_city: str = "", today_km: float = 0.0,
                       rain_confirmed: bool = False,
-                      remark: str = "") -> Dict[str, Any]:
-        """把快照 + 地图知识整理成维度可用的上下文（不含活对象）。"""
+                      remark: str = "", mood: str = "",
+                      memory_hint: str = "") -> Dict[str, Any]:
+        """把快照 + 地图知识 + 情绪/记忆整理成维度可用的上下文（不含活对象）。"""
         ctx: Dict[str, Any] = {
             "clock": "",
             "hour": -1,
@@ -492,6 +513,9 @@ class Companion:
             "open_road": bool(getattr(snap, "is_open_road", False)),
             "rain_confirmed": bool(rain_confirmed),
             "remark": str(remark or ""),
+            "mood": str(mood or ""),
+            "memory_hint": str(memory_hint or ""),
+            "milestone_km": 0.0,
         }
         if getattr(snap, "time_abs_min", 0):
             h = (snap.time_abs_min // 60) % 24
@@ -532,8 +556,13 @@ class Companion:
     # ── 调度 ──
     def next_fact(self, snap, ctx: Optional[dict] = None, now: Optional[float] = None,
                   categories: Optional[dict] = None, gap_multiplier: float = 1.0,
+                  bias: str = "", bias_gain: int = 4,
                   ) -> Optional[Dict[str, str]]:
-        """返回 {id,label,category,fact}；没有到期的维度返回 None。"""
+        """返回 {id,label,category,fact}；没有到期的维度返回 None。
+
+        `bias` 是"刚发生的事"带来的话题倾向（事故 → 关心、货损 → 这单货、
+        罚单 → 安全/打趣…）：给她一个加权的维度，避免刚撞完就聊"服务区吃什么"。
+        """
         if snap is None or not getattr(self.cfg, "companion_enabled", True):
             return None
         ctx = ctx or {}
@@ -558,6 +587,8 @@ class Companion:
             # 别连着两次同一个维度：优先级相近时优先换人
             if dim.id == self._last_dim:
                 key = (key[0] - 1, key[1])
+            if bias and dim.id == bias:
+                key = (key[0] + max(1, int(bias_gain)), key[1])
             if best_key is None or key > best_key:
                 best, best_key = dim, key
         if best is None:
@@ -577,7 +608,15 @@ class Companion:
         self._last_dim = best.id
         fact = (f"[陪玩·{best.label}] {facts}。\n"
                 f"（这次想聊的角度：{best.angle(idx)}）{_REQUIREMENT}")
-        return {"id": best.id, "label": best.label, "category": best.category, "fact": fact}
+        hint = []
+        if ctx.get("mood"):
+            hint.append(f"当前情绪：{ctx['mood']}")
+        if ctx.get("memory_hint"):
+            hint.append(f"可以顺带提一句：{ctx['memory_hint']}")
+        if bias:
+            hint.append("延续刚刚发生的事，别突然换到无关话题")
+        return {"id": best.id, "label": best.label, "category": best.category,
+                "fact": fact, "hint": "；".join(hint)}
 
     def snapshot(self) -> Dict[str, Any]:
         return {

@@ -10,7 +10,6 @@ from ..adapters.llm_client import LLMProvider
 from ..adapters.push_sender import CHAT, CRITICAL, IMPORTANT, PushSender
 from ..adapters.telemetry_client import TelemetryReader
 from ..adapters.telemetry_installer import TelemetryInstaller
-from ..catgirl.bridge import CatgirlBridge
 from .arbiter import Arbiter
 from .companion import Companion
 from .config_model import PawpilotConfig
@@ -32,7 +31,6 @@ from .recall import Recall
 from .route_planner import RoutePlanner
 from .safety_guard import SafetyGuard
 from .scene_chat import SceneChat
-from .small_talk import SmallTalk
 from .templates import EmotionRenderer
 from .trip_summary import TripSummary
 
@@ -85,6 +83,11 @@ CRITICAL_EVENTS = frozenset({
 })
 
 
+# 里程关口（原 SmallTalk 的里程碑表；现在只作为陪玩 milestone 维度的触发源）
+MILESTONE_KM = (100, 500, 1000, 2500, 5000, 10000, 25000, 50000,
+                100000, 200000, 400000, 600000, 1000000)
+
+
 def _memory_mirror_path(plugin: Any) -> Optional[str]:
     """记忆的本地 JSON 兜底路径（宿主 store 出问题时还能救回来）。"""
     try:
@@ -101,7 +104,6 @@ class PawpilotRuntime:
         self.cfg = config
         host_persona = getattr(plugin, "persona", None)
         self.persona = Persona(host_persona)
-        self.catgirl = CatgirlBridge()
         self.llm = LLMProvider()
         self.emotion = EmotionRenderer(self.persona, llm=self.llm)
         self.engine = EventEngine(config)
@@ -121,7 +123,6 @@ class PawpilotRuntime:
         # 内容层（2026-10 玩法扩充）：地点簿（自学习地名坐标）+ 猫娘电台
         self.places = PlaceBook(self.memory)
         self.radio = RadioDJ(config)
-        self.small_talk = SmallTalk(persona=self.persona)
         # 陪玩维度引擎（2026-10 主人定调"陪玩是方方面面的"）：十几个维度轮转，
         # 每条只投事实行，措辞交给宿主 LLM 按人设演绎
         self.companion = Companion(config, map_kb=self.map_kb)
@@ -140,6 +141,11 @@ class PawpilotRuntime:
         self.hud_ocr = None  # 惰性：OCR 可用时创建
         self._pending_photo_scene: str = ""
         self._pending_photo_until: float = 0.0
+        self._last_km: float = 0.0
+        self._last_milestone: float = 0.0
+        self._milestone_km: float = 0.0
+        self._chat_bias: str = ""
+        self._chat_bias_until: float = 0.0
         self._ocr_interval = float(self.ocr_regions.get("scan_interval_s", 240))
         self._last_ocr_at = 0.0
         self._tick_task: Optional[asyncio.Task] = None
@@ -166,6 +172,33 @@ class PawpilotRuntime:
     def _note_push(self) -> None:
         """任何一条推送落地时打时间戳：陪聊要给它让路（别把事件内容挤掉）。"""
         self._last_push_at = time.time()
+
+    # ── 里程碑 & 话题倾向（2026-10 模块关系收拢）──
+    def _track_milestone(self, s) -> None:
+        """里程关口只负责"记一笔"，说什么交给陪玩维度表统一调度。
+
+        原 SmallTalk 模块只剩这一个在用的功能，现已并入 companion 的 milestone 维度。
+        """
+        km = float(getattr(s, "odometer_km", 0) or 0)
+        if km <= 0:
+            return
+        if self._last_km <= 0:               # 第一次读到里程：只对齐基准，不补报历史关口
+            self._last_km = km
+            self._last_milestone = max((m for m in MILESTONE_KM if m <= km), default=0.0)
+            return
+        if km < self._last_km:               # 换车/读档回退
+            self._last_km = km
+            return
+        self._last_km = km
+        for mark in MILESTONE_KM:
+            if self._last_milestone < mark <= km:
+                self._last_milestone = mark
+                self._milestone_km = float(mark)
+
+    def _set_bias(self, dim_id: str, seconds: float) -> None:
+        """给接下来的闲聊定个话题倾向（刚撞完就别聊吃的）。"""
+        self._chat_bias = dim_id
+        self._chat_bias_until = time.time() + seconds
 
     def _spawn(self, coro) -> None:
         """创建后台任务并跟踪，防泄漏；异常打日志。
@@ -571,7 +604,7 @@ class PawpilotRuntime:
                         # 事件检测持续运行：急刹/超速/撞车不依赖任务状态
                         self.arbiter.update_scenario(s)
                         self.proactive.update(s)
-                        self.small_talk.update(s)
+                        self._track_milestone(s)
                         self.engine.feed(s)
                         self.persona.mood.decay_all()
                         # 猫娘智驾：dry_run 时禁止任何输入注入（试运行只跑链路）
@@ -624,23 +657,20 @@ class PawpilotRuntime:
                 snap = self._last_snap
                 if snap is None or not snap.sdk_active:
                     continue
-                # 里程碑（优先，只报一次）
-                topic = self.small_talk.milestone_topic()
-                if topic:
-                    await self.push.push_direct(self.persona.polish(topic))
-                    continue
-                # 画面畅聊：OCR 采样（每 10 分钟一次）
+                # 里程碑：交给陪玩维度表统一调度（原先在这里单独插一条硬编码台词）
+                # 画面畅聊：OCR 采样（每 4 分钟一次）
                 if now - self._last_ocr_at >= self._ocr_interval:
                     self._last_ocr_at = now
                     photo_ask, scene_topic = await self._ocr_scan()
                     if photo_ask:
                         self._spawn(self.push.push_fact(
                             self.emotion.custom_fact(photo_ask, "photo"),
-                            priority=CHAT))
+                            priority=CHAT, topic="photo"))
                         continue
                     if scene_topic:
-                        await self.push.push_direct(self.persona.polish(scene_topic),
-                                                    priority=CHAT)
+                        # 画面里真看到的东西（警车/事故/隧道/收费站…）：按内容走重要车道
+                        await self.push.push_fact(scene_topic, priority=IMPORTANT,
+                                                  topic="screen")
                         continue
                 # ── 接力驾驶提议：开阔路段主动提出"我来开一段"（有动作，不是话）
                 if (getattr(self.cfg, "pilot_relay_enabled", True)
@@ -666,7 +696,7 @@ class PawpilotRuntime:
                     )
                     if place:
                         await self.push.push_fact(self._passing_place_fact(place),
-                                                  priority=CHAT)
+                                                  priority=CHAT, topic="place")
                         continue
                 # 猫娘电台（按时段/天气/驾驶时长挑节目；内容交宿主 LLM 演绎）
                 if getattr(self.cfg, "content_radio_dj", True):
@@ -678,7 +708,7 @@ class PawpilotRuntime:
                                             station_hint=getattr(self, "_radio_station_hint", ""),
                                             weather=weather)
                     if brief:
-                        await self.push.push_fact(brief, priority=CHAT)
+                        await self.push.push_fact(brief, priority=CHAT, topic="radio")
                         continue
                 # ── 陪玩维度引擎（主通道）──────────────────────────────
                 # 2026-10 主人定调"陪玩是方方面面的"：旧版把主动输出收得只剩安全
@@ -704,20 +734,29 @@ class PawpilotRuntime:
                         top_city=self._top_city_name(),
                         rain_confirmed=(getattr(self, "_last_weather_hint", "") == "雨"),
                         remark=self.recall.recent_remark(),
+                        mood=self.persona.mood.primary(),
+                        memory_hint=self.recall.context_hint(top=2),
                     )
+                    cctx["milestone_km"] = self._milestone_km
+                    bias = (self._chat_bias
+                            if now < getattr(self, "_chat_bias_until", 0.0) else "")
                     picked = self.companion.next_fact(
                         snap, cctx, now=now,
                         categories=self.arbiter.broadcast_categories,
-                        gap_multiplier=gap_mul)
+                        gap_multiplier=gap_mul, bias=bias)
                     if picked:
                         self.plugin.logger.info(
                             "[陪玩] %s | %s", picked["id"],
                             picked["fact"].splitlines()[0][:60])
                         if picked["id"] == "remark":
                             self.recall.mark_remark_spoken()
-                        await self.push.push_fact(
-                            self.emotion.custom_fact(picked["fact"], "proactive"),
-                            priority=CHAT)
+                        if picked["id"] == "milestone":
+                            self._milestone_km = 0.0
+                        fact = self.emotion.custom_fact(picked["fact"], "proactive")
+                        if picked.get("hint"):
+                            fact = f"{fact}（{picked['hint']}）"
+                        await self.push.push_fact(fact, priority=CHAT,
+                                                  topic=picked["id"])
                         continue
                 # L3 主动提议（服务区/加油/疲劳/夜间…）
                 # 放宽门控：只要在任务中且未暂停就允许。旧版限定
@@ -947,6 +986,7 @@ class PawpilotRuntime:
             if lines:
                 self._spawn(self.push.push_direct("\n".join(lines)))
             # ── 每单开场故事 + 起点地域文化（事实行交宿主 LLM 演绎，不硬编码台词）
+            self._set_bias("cargo", 300.0)
             if getattr(self.cfg, "content_opening_story", True):
                 self._spawn(self.push.push_fact(self._opening_story_fact(ev.snapshot, hints)))
             return
@@ -968,9 +1008,11 @@ class PawpilotRuntime:
                     self.emotion.custom_fact(crash_hint, "crash"),
                     priority=CRITICAL))
             self._spawn(self._crash_chain(ev))
+            self._set_bias("care", 300.0)     # 刚撞完：接下来的闲聊先聊关心
             return
         if ev.name == "job_delivered" and ev.snapshot:
             self._spawn(self._finish_trip(ev))  # 内部含归档，避免统计竞态
+            self._set_bias("memory", 300.0)   # 刚跑完一单：聊聊这一趟与老记忆
             # 到货只发一条：结算数据行（交宿主 LLM 收尾）。
             # 旧版还额外盲推一句写死的"到站检查"话术，和总结叠在一起像复读。
             snap_d = ev.snapshot
@@ -987,17 +1029,13 @@ class PawpilotRuntime:
                 self._spawn(self.push.push_direct(
                     self.persona.polish(f"赚了 {revenue} € 喵，要不要去车行升级下引擎？")))
             return
-        if ev.name == "refuel":
-            line = self.catgirl.existence_line("refuel")
-            if line:
-                self._spawn(self.push.push_direct(
-                    self.persona.polish(line)))
-            return
-        if ev.name == "game_end":
-            line = self.catgirl.existence_line("game_end")
-            if line:
-                self._spawn(self.push.push_direct(
-                    self.persona.polish(line)))
+        # refuel / game_end 交给通用路径：_render 里已有事实行模板，
+        # 旧的 catgirl.existence_line 是硬编码台词（与"不写死台词"的定调冲突），已删除
+        if ev.name in ("refuel", "game_end"):
+            allowed, reason = self.arbiter.decide(ev.name, ev.snapshot)
+            prompt = self._render(ev) if allowed else None
+            if prompt:
+                self._spawn(self.push.push_fact(prompt, priority=IMPORTANT))
             return
         if ev.name in ("ferry", "train"):
             # 过境：站点名是遥测里唯一可靠的地名 → 学习 + 介绍两端风土
@@ -1034,6 +1072,12 @@ class PawpilotRuntime:
             if prompt:
                 self._spawn(self.push.push_fact(prompt))
             return
+        if ev.name == "fine":
+            self._set_bias("banter", 180.0)   # 刚吃罚单：允许她损你两句
+        if ev.name == "cargo_damage":
+            self._set_bias("cargo", 240.0)    # 货损：先盯着这单货
+        if ev.name == "vehicle_damage":
+            self._set_bias("truck", 240.0)
         allowed, reason = self.arbiter.decide(ev.name, ev.snapshot)
         if not allowed:
             # 留痕：面板决策日志现在也是滚动历史，这里再记一条便于对账

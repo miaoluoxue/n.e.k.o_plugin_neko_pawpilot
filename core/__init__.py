@@ -1,6 +1,7 @@
 """核心层：纯逻辑。"""
 
 from .arbiter import Arbiter
+from .companion import DIMENSIONS, Companion
 from .config_model import PawpilotConfig
 from .event_catalog import EVENT_CATALOG, EventSpec, spec
 from .event_engine import EventEngine, TruckEvent
@@ -21,7 +22,6 @@ from .runtime import PawpilotRuntime
 from .safety_guard import SafetyGuard
 from .scenario import ScenarioMachine
 from .scene_chat import SceneChat
-from .small_talk import SmallTalk
 from .templates import EmotionRenderer
 from .trip_summary import TripSummary
 
@@ -31,4 +31,5 @@ __all__ = ["Arbiter", "PawpilotConfig", "EVENT_CATALOG",
            "Persona", "PhotoAlbum", "PlaceBook", "RadioDJ", "Proactive",
            "DriverProfile", "Recall",
            "RoutePlanner", "PawpilotRuntime", "SafetyGuard", "SceneChat",
-           "ScenarioMachine", "SmallTalk", "TripSummary", "EmotionRenderer"]
+           "ScenarioMachine", "TripSummary", "EmotionRenderer",
+           "Companion", "DIMENSIONS"]

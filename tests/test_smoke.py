@@ -33,7 +33,6 @@ from plugin.plugins.neko_pawpilot.core.scenario import (
     URBAN,
     ScenarioMachine,
 )
-from plugin.plugins.neko_pawpilot.core.small_talk import SmallTalk
 from plugin.plugins.neko_pawpilot.core.templates import EmotionRenderer
 from plugin.plugins.neko_pawpilot.core.trip_summary import TripSummary
 
@@ -560,6 +559,60 @@ def test_photo_album_force_bypasses_cooldown():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_cross_module_topic_dedupe():
+    """跨模块话题去重：电台/途经地点/陪玩/识屏不该各说一遍同一件事。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.adapters.push_sender import PushSender
+
+    class _FakePlugin:
+        def __init__(self):
+            self.calls = []
+            self.logger = None
+
+        def push_message(self, **kw):
+            self.calls.append(kw["parts"][0]["text"])
+            return {"submitted": True}
+
+    fp = _FakePlugin()
+    ps = PushSender(fp, dry_run=False, gap_important=0.0, gap_chat=0.0, topic_gap=300.0)
+    assert asyncio.run(ps.push_fact("风景 A", topic="scenery")) is True
+    assert asyncio.run(ps.push_fact("风景 B", topic="scenery")) is False   # 同话题去重
+    assert ps.dropped == 1
+    assert asyncio.run(ps.push_fact("别的话题", topic="cargo")) is True
+    assert asyncio.run(ps.push_fact("风景 C")) is True                     # 无 topic 不去重
+    # 紧急不参与去重（事故永远要说）
+    assert asyncio.run(ps.push_fact("撞了", priority="critical",
+                                    topic="scenery")) is True
+    assert ps.snapshot()["topics"] >= 2
+
+
+def test_companion_bias_prefers_related_dimension():
+    """刚发生的事决定接下来聊什么：给 bias 时优先选相关维度。"""
+    from plugin.plugins.neko_pawpilot.core.companion import Companion
+
+    def snap():
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.speed_mps = 60 / 3.6
+        s.speed_limit_mps = 90 / 3.6
+        s.time_abs_min = 12 * 60
+        s.fuel = 800.0
+        s.fuel_capacity = 1000.0
+        s.map_scale = 19.0
+        s.route_distance_km = 0.0
+        return s
+
+    cats = {"safety": True, "task": True, "trip": True,
+            "lifecycle": True, "chatter": True}
+    ctx = Companion(_cfg()).build_context(snap())
+    plain = Companion(_cfg()).next_fact(snap(), ctx, now=1_000_000.0, categories=cats)
+    assert plain["id"] in ("road", "ask"), plain["id"]        # 默认选高优先级的路况/反问
+    biased = Companion(_cfg()).next_fact(snap(), ctx, now=1_000_000.0,
+                                         categories=cats, bias="life")
+    assert biased["id"] == "life", biased["id"]                # 给了倾向就聊生活
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 
@@ -995,14 +1048,36 @@ def test_runtime_constructs():
     assert not hasattr(rt, "_world_position_line")
 
 
-def test_small_talk():
-    st = SmallTalk()
-    assert st.random_topic(now=time.time() + 1)
-    # 预触发 100/500 里程碑，验证 1000km
-    st._fired_milestones.update({100, 500})
-    st._last_km = 1200
-    topic = st.milestone_topic()
-    assert topic and "1000km" in topic
+def test_milestone_tracking():
+    """里程关口只负责"记一笔"，说什么交给陪玩 milestone 维度（原 SmallTalk 已合并）。"""
+    from plugin.plugins.neko_pawpilot.core.companion import DIMENSIONS
+    from plugin.plugins.neko_pawpilot.core.runtime import MILESTONE_KM, PawpilotRuntime
+
+    assert 1000 in MILESTONE_KM and 100000 in MILESTONE_KM
+    assert any(d.id == "milestone" for d in DIMENSIONS), "里程碑已并入陪玩维度表"
+
+    class _Stub:
+        _track_milestone = PawpilotRuntime._track_milestone
+
+    st = _Stub()
+    st._last_km = 0.0
+    st._last_milestone = 0.0
+    st._milestone_km = 0.0
+
+    def snap(km):
+        s = TruckSnapshot()
+        s.odometer_km = km
+        return s
+
+    st._track_milestone(snap(1200))          # 第一次只对齐基准，不补报历史关口
+    assert st._milestone_km == 0.0
+    assert st._last_milestone == 1000
+    st._track_milestone(snap(1300))
+    assert st._milestone_km == 0.0           # 没跨关口
+    st._track_milestone(snap(2600))
+    assert st._milestone_km == 2500          # 跨过关口 → 交给陪玩说
+    st._track_milestone(snap(100))           # 读档/换车回退不误报
+    assert st._milestone_km == 2500
 
 
 def test_telemetry_installer():
@@ -1938,8 +2013,8 @@ if __name__ == "__main__":
     print("proactive OK")
     test_profile()
     print("profile OK")
-    test_small_talk()
-    print("small_talk OK")
+    test_milestone_tracking()
+    print("milestone OK")
     test_companion_dimensions()
     print("companion OK")
     test_runtime_constructs()
