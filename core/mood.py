@@ -41,8 +41,9 @@ MOOD_DRIVES: Dict[str, Dict[str, Any]] = {
                    "tone": "现在心情很兴奋：话多一点、活泼一点，可以起哄"},
     "worry":      {"gap_mult": 0.9, "bias": "care",
                    "tone": "现在心里发慌、担心他：多提醒、多关心，语气别轻飘"},
-    "sleepy":     {"gap_mult": 1.5, "bias": "night",
-                   "tone": "现在很困：说话要短、要轻，像半夜陪开车那样"},
+    "sleepy":     {"gap_mult": 1.5, "bias": "care",
+                   "tone": "现在很困：说话要短、要轻、别硬逗他。"
+                           "时段一律按游戏内时间说，没拿到就别提"},
     "sympathy":   {"gap_mult": 1.1, "bias": "care",
                    "tone": "刚经历过不顺利的事：语气温柔一点，别开玩笑"},
     "proud":      {"gap_mult": 0.9, "bias": "memory",
@@ -128,8 +129,12 @@ class Mood:
         2026-10 人设一致性：以前情绪只影响零散几句的措辞，21 个陪玩维度各说各的，
         玩家感受不到"她今天是什么状态"。现在情绪成为一条主线：
           - gap_mult  调陪聊密度（犯困就更安静、兴奋就更热闹）
-          - bias      话题倾向（心疼→关心、得意→回忆、困→夜路）
+          - bias      话题倾向（心疼→关心、得意→回忆）
           - tone      交给宿主 LLM 的语气说明
+
+        注意（2026-10 翻车修正）：`sleepy` 原来 bias 到"夜路"，于是她一边犯困
+        一边聊夜路——可主人游戏里明明是上午，听起来就是假话。现在困了就倾向"关心"，
+        时段一律以游戏内时间为准（见 runtime._greeting）。
         """
         name = self.primary()
         d = MOOD_DRIVES.get(name) or MOOD_DRIVES["calm"]

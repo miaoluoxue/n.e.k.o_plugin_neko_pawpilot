@@ -1625,19 +1625,29 @@ class PawpilotRuntime:
         return None
 
     def _greeting(self) -> str:
-        """按游戏内时段问候。"""
-        import datetime
-        hour = datetime.datetime.now().hour
+        """按**游戏内**时段问候。
+
+        2026-10 翻车：旧版用 `datetime.now()`（真实时钟）判时段。主人晚上 23:36
+        玩、游戏里是上午 8:34，猫娘却说"深夜了喵… 我陪你跑夜路"——他当场判为假话。
+        真实时钟不是游戏时间：游戏内时间只从遥测 `time_abs_min` 拿，拿不到就不提时段。
+        """
         streak = self._bump_streak()
-        base = ""
-        if 5 <= hour < 12:
-            base = " 早呀！今天想拉什么货？"
-        elif 12 <= hour < 18:
-            base = " 下午好喵！今天跑哪条线？"
-        elif 18 <= hour < 23:
-            base = " 晚上好喵！今晚跑哪条线？"
+        snap = self._last_snap
+        mins = int(getattr(snap, "time_abs_min", 0) or 0) if snap is not None else 0
+        if mins <= 0:
+            base = " 上车啦，今天想拉什么货？"
         else:
-            base = " 深夜了喵… 我陪你跑夜路！"
+            hour = (mins // 60) % 24
+            minute = mins % 60
+            clock = f"游戏内 {hour:02d}:{minute:02d}"
+            if 5 <= hour < 12:
+                base = f" 现在是{clock}（上午），今天想拉什么货？"
+            elif 12 <= hour < 18:
+                base = f" 现在是{clock}（下午），今天跑哪条线？"
+            elif 18 <= hour < 23:
+                base = f" 现在是{clock}（游戏里天黑了），今晚跑哪条线？"
+            else:
+                base = f" 现在是{clock}（游戏里深夜），我陪你跑夜路！"
         if streak >= 2:
             base += f" 又是你喵，连续 {streak} 天跑车真勤快！"
         return base

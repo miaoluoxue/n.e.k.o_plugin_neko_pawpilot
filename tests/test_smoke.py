@@ -983,7 +983,9 @@ def test_mood_is_a_through_line():
     drive = m.drive()
     assert drive["mood"] == "sleepy"
     assert drive["gap_mult"] > 1.2          # 困了 → 更安静
-    assert drive["bias"] == "night"
+    # 困了不能再 bias 到"夜路"：主人游戏里可能是上午，听起来就是假话
+    assert drive["bias"] == "care"
+    assert "夜" not in drive["tone"]
     assert "困" in drive["tone"]
 
     # 语气要真的进到陪玩提示里（宿主 LLM 才看得到）
@@ -1280,6 +1282,41 @@ def test_reload_does_not_regreet():
     got2.clear()
     warm.feed(live())
     assert "game_start" in got2, got2
+
+
+def test_greeting_uses_game_clock_not_wall_clock():
+    """问候必须按**游戏内**时间，不能按真实时钟。
+
+    实地翻车（主人原话："而且时间是上午"）：旧版 `_greeting()` 用
+    `datetime.now().hour` 判时段 —— 他晚上 23:36 玩、游戏里明明上午 8:34，
+    猫娘却说"深夜了喵… 我陪你跑夜路"，他当场判为假话。
+    """
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    rt = PawpilotRuntime(FakePlugin(pathlib.Path(".")), _cfg())
+    rt._bump_streak = lambda: 1          # 隔离掉记忆读写，只测时段逻辑
+
+    def snap(minutes: int) -> TruckSnapshot:
+        s = TruckSnapshot()
+        s.sdk_active = True
+        s.on_job = True
+        s.time_abs_min = minutes
+        return s
+
+    # 游戏内上午 8:34 → 必须说上午，绝不许提夜路
+    rt._last_snap = snap(8 * 60 + 34)
+    txt = rt._greeting()
+    assert "08:34" in txt and "上午" in txt, txt
+    assert "夜路" not in txt and "深夜" not in txt, txt
+
+    # 拿不到游戏内时间 → 一个字都不许猜时段（真实时钟再晚也不许说深夜）
+    rt._last_snap = None
+    txt2 = rt._greeting()
+    assert not any(k in txt2 for k in ("上午", "下午", "深夜", "夜路")), txt2
+
+    # 游戏里真的是深夜（23:10）→ 这才可以说夜路
+    rt._last_snap = snap(23 * 60 + 10)
+    assert "夜路" in rt._greeting()
 
 
 def test_hud_ocr_degrades_gracefully():
