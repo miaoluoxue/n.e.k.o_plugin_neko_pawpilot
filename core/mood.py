@@ -35,6 +35,21 @@ MOOD_DEFAULTS = {
     },
 }
 
+# 情绪 → 陪玩的全局倾向（人设主线）。gap_mult 越小越热闹。
+MOOD_DRIVES: Dict[str, Dict[str, Any]] = {
+    "excitement": {"gap_mult": 0.85, "bias": "banter",
+                   "tone": "现在心情很兴奋：话多一点、活泼一点，可以起哄"},
+    "worry":      {"gap_mult": 0.9, "bias": "care",
+                   "tone": "现在心里发慌、担心他：多提醒、多关心，语气别轻飘"},
+    "sleepy":     {"gap_mult": 1.5, "bias": "night",
+                   "tone": "现在很困：说话要短、要轻，像半夜陪开车那样"},
+    "sympathy":   {"gap_mult": 1.1, "bias": "care",
+                   "tone": "刚经历过不顺利的事：语气温柔一点，别开玩笑"},
+    "proud":      {"gap_mult": 0.9, "bias": "memory",
+                   "tone": "现在很得意：可以炫耀、可以夸他，也可以翻旧账夸自己"},
+    "calm":       {"gap_mult": 1.0, "bias": "", "tone": "心情平稳：自然说话"},
+}
+
 
 def _load_mood_config() -> Dict[str, Any]:
     p = Path(__file__).resolve().parent.parent / "data" / "config" / "mood.json"
@@ -106,6 +121,21 @@ class Mood:
 
     def snapshot(self) -> Dict[str, float]:
         return {k: round(v.value, 2) for k, v in self.arcs.items()}
+
+    def drive(self) -> Dict[str, Any]:
+        """当前主导情绪 → 陪玩的**全局倾向**（密度 / 话题 / 语气）。
+
+        2026-10 人设一致性：以前情绪只影响零散几句的措辞，21 个陪玩维度各说各的，
+        玩家感受不到"她今天是什么状态"。现在情绪成为一条主线：
+          - gap_mult  调陪聊密度（犯困就更安静、兴奋就更热闹）
+          - bias      话题倾向（心疼→关心、得意→回忆、困→夜路）
+          - tone      交给宿主 LLM 的语气说明
+        """
+        name = self.primary()
+        d = MOOD_DRIVES.get(name) or MOOD_DRIVES["calm"]
+        out = dict(d)
+        out["mood"] = name
+        return out
 
 
 def _load_host_persona() -> Optional[Dict[str, Any]]:

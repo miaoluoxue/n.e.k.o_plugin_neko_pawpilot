@@ -211,6 +211,10 @@ body::before {
       <button class="btn" onclick="takePhoto()">📸 拍一张</button>
     </div>
     <div class="btn-group" style="margin-top:10px;" id="pilotBtns"></div>
+    <div class="card" style="margin-top:16px;">
+      <h2>💬 陪玩时间线 <span class="line"></span></h2>
+      <div id="timeline"><div class="empty">还没开始说话</div></div>
+    </div>
   </div>
 
   <!-- 活动 -->
@@ -424,6 +428,7 @@ function renderDrive() {
   if (pl) pl.textContent = ps.label || '-';
   var cf = document.getElementById('cargoFamily');
   if (cf) cf.textContent = ps.cargo_family || '-';
+  renderTimeline(s);
   document.getElementById('broadcast').textContent = s.dry_run ? 'dry_run（试运行）' : '已开启';
   // 猫娘智驾按钮（按状态显示）
   var pst = (s.pilot || {}).state || 'idle';
@@ -440,6 +445,32 @@ function renderDrive() {
   } else {
     pb.innerHTML = '<button class="btn btn-ghost" onclick="pilotOffer()">🤖 猫娘帮我开会儿</button>';
   }
+}
+
+function renderTimeline(s) {
+  var box = document.getElementById('timeline');
+  if (!box) return;
+  var list = ((s.push || {}).recent) || [];
+  var mark = {
+    sent: { t:'说了', c:'ok' }, queued: { t:'排队', c:'no' },
+    dropped_topic: { t:'去重', c:'no' }, muted: { t:'静默', c:'no' },
+    failed: { t:'失败', c:'no' }
+  };
+  var prio = { critical: '🔴', important: '🟡', chat: '⚪' };
+  var mdr = s.mood_drive || {};
+  box.innerHTML = list.length ? (
+    '<div style="color:var(--text3);font-size:0.7rem;margin-bottom:8px;">' +
+      '当前情绪主线：' + (mdr.mood || '-') + ' · 陪聊密度 ×' + (mdr.gap_mult || 1) +
+      ' · ' + ((s.push || {}).pending || 0) + ' 条待发</div>' +
+    list.map(function (e) {
+      var mk = mark[e.status] || { t: e.status, c: 'no' };
+      var t = new Date((e.ts || 0) * 1000);
+      var hh = ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+      return '<div class="log-item"><span class="res ' + mk.c + '">' + mk.t + '</span>' +
+        '<span>' + (prio[e.priority] || '') + ' ' + (e.topic || '-') + '</span>' +
+        '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+        (e.text || '') + '</span><span class="why">' + hh + '</span></div>';
+    }).join('')) : '<div class="empty">还没开始说话</div>';
 }
 
 function renderMemory() {

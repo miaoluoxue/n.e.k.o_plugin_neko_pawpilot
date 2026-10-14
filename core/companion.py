@@ -536,7 +536,7 @@ class Companion:
                       remark: str = "", mood: str = "",
                       memory_hint: str = "", diary_today: Any = None,
                       diary_last: Any = None, driving_by: str = "",
-                      profile_label: str = "") -> Dict[str, Any]:
+                      profile_label: str = "", mood_tone: str = "") -> Dict[str, Any]:
         """把快照 + 地图知识 + 情绪/记忆整理成维度可用的上下文（不含活对象）。"""
         ctx: Dict[str, Any] = {
             "clock": "",
@@ -564,6 +564,7 @@ class Companion:
             "play_advice": "",
             "cargo_family": "",
             "profile_label": str(profile_label or ""),
+            "mood_tone": str(mood_tone or ""),
         }
         if getattr(snap, "time_abs_min", 0):
             h = (snap.time_abs_min // 60) % 24
@@ -657,6 +658,8 @@ class Companion:
         fact = (f"[陪玩·{best.label}] {facts}。\n"
                 f"（这次想聊的角度：{best.angle(idx)}）{_REQUIREMENT}")
         hint = []
+        if ctx.get("mood_tone"):
+            hint.append(ctx["mood_tone"])          # 情绪主线：所有维度共用的语气底
         if ctx.get("mood"):
             hint.append(f"当前情绪：{ctx['mood']}")
         if ctx.get("memory_hint"):

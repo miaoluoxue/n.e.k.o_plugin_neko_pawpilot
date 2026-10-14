@@ -47,6 +47,22 @@ class PushSender:
         self._chat_mute_until = 0.0
         self._topic_last: Dict[str, float] = {}
         self.dropped = 0
+        self.recent: List[Dict[str, Any]] = []   # 陪玩时间线（最近 30 条，含被拦原因）
+
+    def _record(self, status: str, priority: str, kind: str, topic: str, text: str) -> None:
+        """把每次"决定"记进时间线：说了 / 排队 / 被去重 / 静默期。
+
+        为什么要记被拦的：主人问过"她怎么不说话"，而日志里只能看到说了什么。
+        """
+        self.recent.insert(0, {
+            "ts": round(time.time(), 1),
+            "status": status,
+            "priority": priority,
+            "kind": kind,
+            "topic": topic or "",
+            "text": " ".join(str(text or "").split())[:70],
+        })
+        del self.recent[30:]
 
     # ── 跨模块话题去重 ──
     # 电台、途经地点、陪玩维度、画面识景分属不同模块，很容易各说一遍同一件事
@@ -65,7 +81,8 @@ class PushSender:
     def snapshot(self) -> Dict[str, Any]:
         return {"pending": len(self._queue), "dropped": self.dropped,
                 "chat_mute_s": max(0.0, round(self._chat_mute_until - time.time())),
-                "topics": len(self._topic_last)}
+                "topics": len(self._topic_last),
+                "recent": list(self.recent[:20])}
 
     # ── 日志/回调 ──
     def _log(self, level: str, msg: str, *args: Any) -> None:
@@ -146,23 +163,28 @@ class PushSender:
         if topic and priority != CRITICAL and self.topic_blocked(topic, now):
             self.dropped += 1
             self._log("info", "[推送·去重] topic=%s 已说过，本轮跳过", topic)
+            self._record("dropped_topic", priority, kind, topic, text)
             return False
         if priority == CRITICAL:
             # 紧急先走：丢掉排队的闲聊，并让闲聊安静一会儿
             self._queue = [q for q in self._queue if q["priority"] != CHAT]
             self._chat_mute_until = now + self.mute_after_critical
             ok = await self._transmit(text, kind, priority, lanlan)
+            self._record("sent" if ok else "failed", priority, kind, topic, text)
             if ok:
                 self.mark_topic(topic, now)
             return ok
         if priority == CHAT and now < self._chat_mute_until:
+            self._record("muted", priority, kind, topic, text)
             return False                     # 紧急善后期，闲聊不插嘴
         if self.lane_free(priority, now) and not self._queue:
             ok = await self._transmit(text, kind, priority, lanlan)
+            self._record("sent" if ok else "failed", priority, kind, topic, text)
             if ok:
                 self.mark_topic(topic, now)
             return ok
         self._enqueue(text, kind, priority, ttl, lanlan, topic)
+        self._record("queued", priority, kind, topic, text)
         return False
 
     async def drain(self) -> bool:
@@ -178,10 +200,14 @@ class PushSender:
         if self.topic_blocked(head.get("topic", ""), now):
             self._queue.pop(0)
             self.dropped += 1
+            self._record("dropped_topic", head["priority"], head["kind"],
+                         head.get("topic", ""), head["text"])
             return False
         self._queue.pop(0)
         ok = await self._transmit(head["text"], head["kind"], head["priority"],
                                   head.get("lanlan", ""))
+        self._record("sent" if ok else "failed", head["priority"], head["kind"],
+                     head.get("topic", ""), head["text"])
         if ok:
             self.mark_topic(head.get("topic", ""), now)
         return ok

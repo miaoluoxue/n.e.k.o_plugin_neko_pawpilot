@@ -182,6 +182,7 @@ class PawpilotRuntime:
         self._milestone_km: float = 0.0
         self._chat_bias: str = ""
         self._chat_bias_until: float = 0.0
+        self._mood_drive: Optional[Dict[str, Any]] = None
         self._ocr_interval = float(self.ocr_regions.get("scan_interval_s", 240))
         self._last_ocr_at = 0.0
         self._tick_task: Optional[asyncio.Task] = None
@@ -506,6 +507,8 @@ class PawpilotRuntime:
             "diary": self.diary.snapshot(top=5),
             "playstyle": (self.playbook.describe(s) if s is not None
                           else self.playbook.describe(None)),
+            "push": self.push.snapshot(),
+            "mood_drive": (self._mood_drive or self.persona.mood.drive()),
             "top_cities": self._top_entries("cities"),
             "top_cargos": self._top_entries("cargos"),
             "scenario": arb.get("scenario", "IDLE"),
@@ -696,14 +699,17 @@ class PawpilotRuntime:
                 snap = self._last_snap
                 if snap is None or not snap.sdk_active:
                     continue
-                # 统一的"陪聊密度"倍率：面板播报频率 × 玩法画像。
+                # 统一的"陪聊密度"倍率：面板播报频率 × 玩法画像 × 当前情绪。
                 # 2026-10 修正：以前只有事件冷却和陪玩维度吃这个倍率，电台/途经地点/
                 # 识屏各用各的固定间隔 → 调「安静」并不会真的让整体安静下来。
                 st_play = self.playbook.classify(snap)
                 self._playstyle = st_play
+                mood_drive = self.persona.mood.drive()
+                self._mood_drive = mood_drive
                 chatter_mult = (BROADCAST_FREQUENCY_MULTIPLIERS.get(
                     self.arbiter.broadcast_frequency, 1.0)
-                    * float(getattr(st_play, "gap_mult", 1.0) or 1.0))
+                    * float(getattr(st_play, "gap_mult", 1.0) or 1.0)
+                    * float(mood_drive.get("gap_mult", 1.0) or 1.0))
                 # 里程碑：交给陪玩维度表统一调度（原先在这里单独插一条硬编码台词）
                 # 画面畅聊：OCR 采样（基准 4 分钟，同样受陪聊密度影响）
                 if now - self._last_ocr_at >= self._ocr_interval * chatter_mult:
@@ -783,6 +789,7 @@ class PawpilotRuntime:
                         rain_confirmed=(getattr(self, "_last_weather_hint", "") == "雨"),
                         remark=self.recall.recent_remark(),
                         mood=self.persona.mood.primary(),
+                        mood_tone=str(mood_drive.get("tone", "")),
                         memory_hint=self.recall.context_hint(top=2),
                         diary_today=self.diary.today_summary(),
                         diary_last=self.diary.last() or {},
@@ -799,8 +806,9 @@ class PawpilotRuntime:
                     bias = (self._chat_bias
                             if now < getattr(self, "_chat_bias_until", 0.0) else "")
                     if not bias:
-                        # 没有刚发生的事时，按玩法倾向选话题（观光→风景、市区→进城…）
-                        bias = st_play.chat_bias
+                        # 没有刚发生的事：先看情绪主线（心疼→关心、困→夜路），
+                        # 再看玩法倾向（观光→风景、市区→进城…）
+                        bias = mood_drive.get("bias") or st_play.chat_bias
                     picked = self.companion.next_fact(
                         snap, cctx, now=now,
                         categories=self.arbiter.broadcast_categories,

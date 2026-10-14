@@ -969,6 +969,73 @@ def test_chatter_multiplier_is_uniform():
     assert RadioDJ(cfg2).pick(s, 1000.0, interval_mult=0.5) is None
 
 
+def test_mood_is_a_through_line():
+    """人设一致性：情绪要贯穿密度 / 话题倾向 / 语气三处，不只是措辞。"""
+    from plugin.plugins.neko_pawpilot.core.companion import Companion
+    from plugin.plugins.neko_pawpilot.core.mood import MOOD_DRIVES, Mood, Persona
+
+    for name, d in MOOD_DRIVES.items():
+        assert "gap_mult" in d and "bias" in d and "tone" in d, name
+        assert d["gap_mult"] > 0
+    m = Mood()
+    assert m.drive()["mood"] == "calm" and m.drive()["gap_mult"] == 1.0
+    m.trigger("sleepy", 0.8)
+    drive = m.drive()
+    assert drive["mood"] == "sleepy"
+    assert drive["gap_mult"] > 1.2          # 困了 → 更安静
+    assert drive["bias"] == "night"
+    assert "困" in drive["tone"]
+
+    # 语气要真的进到陪玩提示里（宿主 LLM 才看得到）
+    comp = Companion(_cfg())
+    s = TruckSnapshot()
+    s.sdk_active = True
+    s.speed_mps = 60 / 3.6
+    s.speed_limit_mps = 90 / 3.6
+    s.time_abs_min = 12 * 60
+    ctx = comp.build_context(s, mood_tone="现在心情很兴奋：话多一点", mood="excitement")
+    cats = {"safety": True, "task": True, "trip": True,
+            "lifecycle": True, "chatter": True}
+    got = None
+    for i in range(40):
+        got = comp.next_fact(s, ctx, now=1_000_000.0 + i * 200, categories=cats)
+        if got:
+            break
+    assert got and "话多一点" in (got.get("hint") or "")
+
+    p = Persona()
+    p.mood.trigger("proud", 0.9)
+    assert p.mood.drive()["bias"] == "memory"
+
+
+def test_push_timeline_records_decisions():
+    """陪玩时间线：不仅记"说了什么"，也记"为什么没说"。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.adapters.push_sender import PushSender
+
+    class _FakePlugin:
+        def __init__(self):
+            self.calls = []
+            self.logger = None
+
+        def push_message(self, **kw):
+            self.calls.append(kw["parts"][0]["text"])
+            return {"submitted": True}
+
+    fp = _FakePlugin()
+    ps = PushSender(fp, dry_run=False, gap_important=0.0, gap_chat=45.0, topic_gap=300.0)
+    asyncio.run(ps.push_fact("内容一", priority="important", topic="a"))
+    asyncio.run(ps.push_fact("内容二", priority="important", topic="b"))    # 排队
+    asyncio.run(ps.push_fact("重复话题", priority="important", topic="a"))   # 去重
+    asyncio.run(ps.push_fact("闲聊", priority="chat", topic="c"))           # 静默/排队
+    recent = ps.snapshot()["recent"]
+    statuses = [e["status"] for e in recent]
+    assert "sent" in statuses and "queued" in statuses and "dropped_topic" in statuses
+    assert recent[0]["ts"] > 0 and recent[0]["text"]
+    assert len(recent) <= 20
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 
