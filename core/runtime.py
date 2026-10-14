@@ -21,7 +21,7 @@ from .knowledge import KnowledgeBase
 from .ledger import Ledger
 from .level_celebrate import LevelCelebrate
 from .map_kb import MapKnowledge
-from .memory import MemoryStore
+from .memory import STORE_KEY, MemoryStore, unwrap_result
 from .mood import Persona
 from .photo_album import PhotoAlbum
 from .pilot import CatPilot
@@ -756,6 +756,7 @@ class PawpilotRuntime:
                         diary_today=self.diary.today_summary(),
                         diary_last=self.diary.last() or {},
                         driving_by=("catgirl" if self.pilot.state == "engaged" else "user"),
+                        profile_label=self.profile.label(),
                     )
                     cctx["milestone_km"] = self._milestone_km
                     fam = self.cargo_book.classify(getattr(snap, "cargo_id", ""),
@@ -866,6 +867,93 @@ class PawpilotRuntime:
     def _snap_speed_label(self) -> str:
         s = self._last_snap
         return f"{s.speed_kmh:.0f} km/h" if s is not None else "未知"
+
+    async def diagnose(self) -> Dict[str, Any]:
+        """自检：把每个子系统"到底能不能用"摊开说。
+
+        为什么需要：这个插件吃过太多次"静默失效"的亏——识屏从来没过（宿主没装
+        mss）、记忆从来没存住（宿主 store 返回 Ok 包装）、面板整片空白（一个字段
+        类型不对整段渲染被掐断）。它们都不会报错，只会不工作。
+        所以这里逐项**真的去试一次**，而不是查配置。
+        """
+        items: list = []
+
+        def add(name: str, ok: bool, detail: str, hint: str = "") -> None:
+            items.append({"name": name, "ok": bool(ok), "detail": detail, "hint": hint})
+
+        # ── 遥测 ──
+        st = self.telemetry_install_state or {}
+        add("遥测文件", st.get("status") == "ok",
+            st.get("detail", "未知"), "游戏未运行时才能写入 bin/win_x64/plugins/")
+        add("游戏连接", bool(self._game_running), "游戏进程已识别" if self._game_running else "没检测到游戏",
+            "启动欧卡2 后进入驾驶即自动连接")
+        snap = self._last_snap
+        add("遥测数据", snap is not None,
+            (f"车速 {snap.speed_kmh:.0f} km/h · 油量 {snap.fuel_percent:.0f}%"
+             if snap is not None else "还没有拿到有效帧"), "在主菜单时拿不到驾驶数据是正常的")
+
+        # ── 地图与位置 ──
+        mk = self.map_kb.snapshot()
+        add("地图知识库", bool(mk.get("loaded")),
+            f"{mk.get('roads', 0)} 段道路 · {mk.get('facilities', 0)} 个设施")
+
+        # ── 记忆持久化（最容易静默失效的一块）──
+        mem_counts = self.memory.snapshot()
+        kinds = sum(1 for v in mem_counts.values() if v)
+        stored = None
+        try:
+            stored = unwrap_result(await self.plugin.store.get(STORE_KEY))
+        except Exception as exc:            # noqa: BLE001
+            stored = None
+            add("记忆读写", False, f"读取宿主 store 失败：{exc}", "检查插件 store 是否启用")
+        else:
+            in_store = isinstance(stored, dict) and any(bool(v) for v in stored.values())
+            if in_store and self.memory.is_empty():
+                add("记忆读写", False, "存档里有数据但内存是空的 → 加载链路有问题",
+                    "这条一旦出现就是 bug，请把日志给我")
+            else:
+                add("记忆读写", True,
+                    f"内存 {kinds} 类 / 存档 {'有' if in_store else '空'}"
+                    + (f" · {self.memory.last_error}" if self.memory.last_error else ""))
+        if self.memory._mirror is not None:      # noqa: SLF001
+            exists = self.memory._mirror.exists()   # noqa: SLF001
+            add("记忆兜底镜像", exists, str(self.memory._mirror),  # noqa: SLF001
+                "跑第一单后才会写第一份镜像")
+        add("旅途日记", True, f"今天 {self.diary.today_summary()['trips']} 单 · "
+                              f"累计 {self.diary.snapshot()['count']} 条")
+        add("地点簿", True, f"认识 {self.places.count()} 个地名")
+
+        # ── 识屏（真的构造一次后端 + 截一张图）──
+        if self.hud_ocr is None:
+            from ..adapters.hud_ocr import HudOcr
+            self.hud_ocr = HudOcr(self.plugin)
+        ocr = self.hud_ocr.snapshot()
+        if ocr.get("available"):
+            add("屏幕识别", True, f"截屏后端 {ocr.get('capture') or 'gdi'} · OCR 后端就绪")
+        else:
+            add("屏幕识别", False, ocr.get("error", "不可用"), "没有它就只能靠遥测")
+
+        # ── 播报链路 ──
+        ps = self.push.snapshot()
+        add("播报模式", not self.cfg.dry_run,
+            "正式播报" if not self.cfg.dry_run else "试运行（只记录，不推送）",
+            "面板设置页可切换")
+        add("播报队列", True,
+            f"待发 {ps['pending']} · 去重丢弃 {ps['dropped']}")
+
+        # ── 陪玩引擎 ──
+        cs = self.companion.snapshot()
+        fired = len(cs.get("last", {}))
+        add("陪玩引擎", cs.get("dimensions", 0) > 0,
+            f"{cs.get('dimensions')} 个维度 · 已触发 {fired} 个 · 间隔 {cs.get('gap_s'):.0f}s")
+        add("玩法画像", self._playstyle is not None,
+            (self._playstyle.label if self._playstyle else "还没判定（进入驾驶后开始）"))
+        add("本局累计", True,
+            f"{len(self._activity)} 条活动 · 台账 {len(self.ledger.month_summary())} 项")
+
+        failed = [i for i in items if not i["ok"]]
+        return {"ok": not failed, "items": items,
+                "failed": [i["name"] for i in failed]}
 
     async def take_photo(self, scene: str = "", auto: bool = False) -> Dict[str, Any]:
         """拍一张：面板按钮 / 主人说"拍吧" / 她自己按场景拍。

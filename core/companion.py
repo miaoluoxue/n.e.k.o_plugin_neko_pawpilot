@@ -299,6 +299,9 @@ def f_banter(snap, ctx) -> str:
         bits.append(f"车身有 {snap.max_damage * 100:.0f}% 的损伤")
     if snap.on_job and snap.city_dst:
         bits.append(f"正往 {snap.city_dst} 去")
+    # 驾驶画像：让她真的"认识你"（标签来自真实统计，不是编的）
+    if ctx.get("profile_label"):
+        bits.append(f"他长期以来的驾驶画像：{ctx['profile_label']}")
     return "；".join(bits)
 
 
@@ -444,7 +447,8 @@ DIMENSIONS: Tuple[Dimension, ...] = (
         ("打趣他开车的小习惯", "夸他开得稳（或损他刚才那脚刹车，别真批评）",
          "调侃他选的这条路/这一单", "假装嫌弃其实是在关心",
          "拿他的车速开玩笑（点到为止）", "用一句话给他打气",
-         "吐槽一下他的选歌品味（若有）", "跟他打个赌，赌谁先犯困"),
+         "拿他的驾驶画像开涮（爱超速/夜猫子之类，点到为止，别真的训人）",
+         "跟他打个赌，赌谁先犯困"),
         lambda s, c: s.speed_kmh > 10,
         f_banter,
     ),
@@ -531,7 +535,8 @@ class Companion:
                       rain_confirmed: bool = False,
                       remark: str = "", mood: str = "",
                       memory_hint: str = "", diary_today: Any = None,
-                      diary_last: Any = None, driving_by: str = "") -> Dict[str, Any]:
+                      diary_last: Any = None, driving_by: str = "",
+                      profile_label: str = "") -> Dict[str, Any]:
         """把快照 + 地图知识 + 情绪/记忆整理成维度可用的上下文（不含活对象）。"""
         ctx: Dict[str, Any] = {
             "clock": "",
@@ -558,6 +563,7 @@ class Companion:
             "play_label": "",
             "play_advice": "",
             "cargo_family": "",
+            "profile_label": str(profile_label or ""),
         }
         if getattr(snap, "time_abs_min", 0):
             h = (snap.time_abs_min // 60) % 24

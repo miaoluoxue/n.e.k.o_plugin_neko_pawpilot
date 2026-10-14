@@ -856,6 +856,61 @@ def test_rest_sleep_and_fuel_style_and_city_checkin():
     assert book.query_visits("Torino") == 3       # 第 4 次来 → "老朋友"
 
 
+def test_self_check_diagnose():
+    """自检表：每项都要真的试一次，而不是查配置；记忆加载失败必须被抓出来。"""
+    import asyncio
+
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    class _Logger:
+        def info(self, *a, **k):
+            pass
+
+        def warning(self, *a, **k):
+            pass
+
+    class _Plug(FakePlugin):
+        def __init__(self, tmp, store):
+            super().__init__(tmp)
+            self.store = store
+            self.logger = _Logger()
+
+        def data_path(self, *a):
+            return tmp.joinpath(*a)
+
+    def run_with(store):
+        rt = PawpilotRuntime(_Plug(tmp, store), _cfg())
+        return asyncio.run(rt.diagnose())
+
+    tmp = pathlib.Path(__file__).parent / ".tmp_diag_test"
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        # 宿主真实形态：Ok(...) 包装的 store
+        report = run_with(HostLikeStore())
+        names = {i["name"] for i in report["items"]}
+        assert {"遥测文件", "游戏连接", "地图知识库", "记忆读写", "屏幕识别",
+                "播报模式", "陪玩引擎"} <= names
+        assert "items" in report and isinstance(report["failed"], list)
+        # 记忆项：测试环境里内存/存档都空，应判为"读得通"
+        mem = next(i for i in report["items"] if i["name"] == "记忆读写")
+        assert mem["ok"] is True
+
+        # 关键回归：存档里有数据、内存却是空的 → 必须报错（就是当初记忆丢失的形态）
+        bad = HostLikeStore()
+        bad.data["neko_pawpilot:memory"] = {"cities": {"Torino": {"count": 3}}}
+        report2 = run_with(bad)
+        mem2 = next(i for i in report2["items"] if i["name"] == "记忆读写")
+        assert mem2["ok"] is False
+        assert "加载链路" in mem2["detail"]
+        assert "记忆读写" in report2["failed"]
+
+        # 识屏项：测试环境没有宿主 OCR 组件 → 应给出失败原因而不是崩
+        ocr = next(i for i in report2["items"] if i["name"] == "屏幕识别")
+        assert ocr["ok"] is False and ocr["detail"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_fuel_advice_by_range():
     """加油建议的核心是"跑不跑得到"，不是油量百分比高低。
 

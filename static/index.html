@@ -225,7 +225,9 @@ body::before {
   <div id="view-diagnostics" style="display:none;">
     <div class="btn-group" style="margin-bottom:14px;">
       <button class="btn btn-accent" onclick="installTelemetry()">📥 导入遥测文件</button>
+      <button class="btn" onclick="runDiagnose()">🩺 自检</button>
     </div>
+    <div id="selfCheck" style="margin-bottom:14px;"></div>
     <div class="diag-grid" id="diagGrid"></div>
     <div class="card" style="margin-top:16px;">
       <h2>📊 决策日志 <span class="line"></span></h2>
@@ -654,6 +656,25 @@ async function takePhoto() {
   var r = await callEntry('take_photo', {});
   toast((r && r.reply) || '拍照失败', !(r && r.reply));
   setTimeout(loadState, 800);
+}
+
+async function runDiagnose() {
+  var box = document.getElementById('selfCheck');
+  if (box) box.innerHTML = '<div class="card"><h2>🩺 自检中… <span class="line"></span></h2><div class="empty">正在逐项实测（识屏会真截一张图，稍等）</div></div>';
+  var r = await callEntry('diagnose', {}, 30000);
+  var items = (r && r.items) || [];
+  if (!items.length) { toast('自检没返回结果', true); if (box) box.innerHTML = ''; return; }
+  var bad = items.filter(function (i) { return !i.ok; }).length;
+  if (box) box.innerHTML = '<div class="card"><h2>🩺 自检结果 · ' +
+    (bad ? ('<span style="color:var(--red)">' + bad + ' 项有问题</span>') : '<span style="color:var(--green)">全部正常</span>') +
+    ' <span class="line"></span></h2>' +
+    items.map(function (i) {
+      return '<div class="row"><span class="k">' + (i.ok ? '✅ ' : '❌ ') + i.name +
+        '</span><span class="v">' + (i.detail || '') +
+        (i.ok || !i.hint ? '' : '<br><span style="color:var(--text3);font-size:0.7rem">' + i.hint + '</span>') +
+        '</span></div>';
+    }).join('') + '</div>';
+  toast(bad ? ('自检发现 ' + bad + ' 项问题') : '自检通过：全部正常', bad > 0);
 }
 
 async function toggleVoiceStyle(style) {

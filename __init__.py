@@ -198,6 +198,26 @@ class NekoPawpilotPlugin(NekoPluginBase):
             return Err(SdkError("交还驾驶失败喵"))
 
     @plugin_entry(
+        id="diagnose",
+        name="自检",
+        description="逐个试一遍各子系统（遥测/地图/记忆/识屏/播报/陪玩）到底能不能用，返回体检表。面板上也有按钮。",
+        input_schema={"type": "object", "properties": {}},
+    )
+    async def entry_diagnose(self, **_) -> Any:
+        """子系统体检：把静默失效的东西摊开说。"""
+        try:
+            if not self.rt:
+                return Err(SdkError("猫爪副驾还没准备好喵"))
+            report = await self.rt.diagnose()
+            failed = report.get("failed") or []
+            summary = ("全部正常喵" if not failed
+                       else "有问题：" + "、".join(failed))
+            return Ok({"summary": summary, **report})
+        except Exception as exc:
+            self.logger.warning("diagnose failed: %s", exc)
+            return Err(SdkError("自检失败喵"))
+
+    @plugin_entry(
         id="take_photo",
         name="拍一张",
         description="把当前画面拍下来存进美景相册。玩家说拍照/拍一张/拍吧/截个图时调用，面板上也有按钮。",
