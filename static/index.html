@@ -557,7 +557,7 @@ function renderDiagnostics() {
   var items = [];
   items.push({ n:'游戏连接', s: s.connected ? '正常' : (s.game_running ? '主菜单' : '未检测到'), cls: s.connected ? 'good' : (s.game_running ? 'warn' : 'bad'), d: s.connected ? '遥测共享内存已连接' : (s.game_running ? '游戏运行中，进入驾驶后连接' : '启动游戏后自动连接') });
   var tl = s.telemetry_install || {};
-  var tlMap = { ok:['已就绪','good','遥测插件已自动导入'], installed:['待重启','warn','已安装，重启游戏生效'], updated:['待重启','warn','已更新，重启游戏生效'], locked:['被占用','bad','游戏运行中无法写入，关闭游戏后重试'], no_game:['未找到游戏','bad','未检测到欧卡2安装目录'], no_bundle:['缺文件','bad','插件缺少捆绑遥测文件'] };
+  var tlMap = { install_required:['待确认','warn','启动只检测；点击“导入遥测文件”并确认后才安装'], update_required:['可更新','warn','已有不同版本；确认后会先备份再更新'], confirm_required:['待确认','warn','安装或更新需要用户明确确认'], ok:['已就绪','good','遥测文件与捆绑版本一致'], installed:['待重启','warn','已安装，重启游戏生效'], updated:['待重启','warn','旧文件已备份，新遥测已写入'], backup_failed:['备份失败','bad','未覆盖原文件，请检查插件数据目录写权限'], locked:['被占用','bad','游戏运行中无法写入，关闭游戏后重试'], no_game:['未找到游戏','bad','未检测到欧卡2安装目录'], no_bundle:['缺文件','bad','插件缺少捆绑遥测文件'] };
   var tls = tlMap[tl.status] || ['未知', 'warn', tl.detail || ''];
   items.push({ n:'遥测插件', s: tls[0], cls: tls[1], d: tls[2] });
   if (s.game_dir) items.push({ n:'游戏目录', s: '已匹配', cls: 'good', d: s.game_dir });
@@ -740,9 +740,13 @@ async function loadState() {
 }
 
 async function installTelemetry() {
-  var r = await callEntry('install_telemetry', {});
+  var ok = window.confirm('将安装或更新欧卡2遥测 DLL。覆盖旧版本前会先备份到插件 data/telemetry_backups。请先关闭游戏，是否继续？');
+  if (!ok) return;
+  var r = await callEntry('install_telemetry', {confirm:true});
   if (r && r.status === 'ok') toast('遥测插件已就绪');
-  else if (r && (r.status === 'installed' || r.status === 'updated')) toast('已写入，重启游戏生效');
+  else if (r && r.status === 'installed') toast('已写入，重启游戏生效');
+  else if (r && r.status === 'updated') toast('旧文件已备份，新遥测已写入');
+  else if (r && r.status === 'backup_failed') toast(r.detail || '原文件备份失败，未覆盖', true);
   else toast((r && r.detail) || '导入遥测失败', true);
   setTimeout(loadState, 800);
 }

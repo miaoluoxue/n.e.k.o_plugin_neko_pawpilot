@@ -1,5 +1,5 @@
 {
-  "dry_run": false,
+  "dry_run": true,
   "voice_styles": [
     "default"
   ],

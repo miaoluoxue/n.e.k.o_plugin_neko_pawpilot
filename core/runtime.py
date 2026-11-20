@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..adapters.llm_client import LLMProvider
@@ -135,6 +136,14 @@ def _memory_mirror_path(plugin: Any) -> Optional[str]:
         return None
 
 
+def _telemetry_backup_dir(plugin: Any) -> Optional[Path]:
+    """遥测 DLL 备份只放插件私有数据目录，不写系统临时目录。"""
+    try:
+        return Path(plugin.data_path("telemetry_backups"))
+    except Exception:                       # noqa: BLE001
+        return None
+
+
 class PawpilotRuntime:
     """插件运行时。"""
 
@@ -179,7 +188,8 @@ class PawpilotRuntime:
         self.photo_album = PhotoAlbum(plugin)
         self.telemetry_installer = TelemetryInstaller(
             plugin_rel=config.telemetry_plugin_rel,
-            bundle_rel=config.telemetry_bundle_rel)
+            bundle_rel=config.telemetry_bundle_rel,
+            backup_dir=_telemetry_backup_dir(plugin))
         self.telemetry_install_state: Dict[str, str] = {}
         self._game_dir: Optional[str] = None
         self.ocr_regions = self._load_ocr_regions()
@@ -457,8 +467,10 @@ class PawpilotRuntime:
             target=self._bg_runner, daemon=True, name="pawpilot-bg")
         self._bg_thread.start()
         self._game_dir = self.telemetry_installer.detect_game_dir()
-        self.telemetry_install_state = self.telemetry_installer.install(self._game_dir)
+        # 启动只读检测；安装/覆盖必须由面板或工具入口携带 confirm=true。
+        self.telemetry_install_state = self.telemetry_installer.status(self._game_dir)
         return {"status": "ready", "telemetry": self._probe_telemetry(),
+                "telemetry_install": self.telemetry_install_state,
                 "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot(),
                 "llm": self.llm.snapshot()}
 
@@ -511,11 +523,12 @@ class PawpilotRuntime:
         return {"status": "ready", "telemetry": self._probe_telemetry(),
                 "dry_run": self.cfg.dry_run, "map": self.map_kb.snapshot()}
 
-    def install_telemetry(self) -> Dict[str, str]:
-        """手动触发遥测文件写入（复用已探测的游戏目录）。"""
+    def install_telemetry(self, confirm: bool = False) -> Dict[str, str]:
+        """用户确认后写入遥测文件；未确认时只返回待确认状态。"""
         if not self._game_dir:
             self._game_dir = self.telemetry_installer.detect_game_dir()
-        self.telemetry_install_state = self.telemetry_installer.install(self._game_dir)
+        self.telemetry_install_state = self.telemetry_installer.install(
+            self._game_dir, confirm=confirm)
         return self.telemetry_install_state
 
     def pilot_accept(self) -> str:

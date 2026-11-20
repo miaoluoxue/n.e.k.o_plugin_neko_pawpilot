@@ -3,6 +3,7 @@
 # 包链 + SDK stub 由 conftest.py 建立；本文件只做纯 import（避免 E402）。
 from __future__ import annotations
 
+import json
 import pathlib
 import shutil
 import time
@@ -90,6 +91,37 @@ def test_config_section():
     assert cfg.push_visibility == ["chat"]
     assert cfg.global_rate_limit_s == 12.0
     assert cfg.safety_failure_limit == 5
+
+
+def test_shipped_ui_settings_start_in_dry_run():
+    """随包面板设置必须是试运行；用户可之后在面板主动关闭 dry-run。"""
+    settings = json.loads(
+        (_ROOT / "data" / "config" / "ui_settings.json").read_text(encoding="utf-8")
+    )
+    assert settings["dry_run"] is True
+
+
+def test_telemetry_install_entry_requires_human_confirmation():
+    """安装入口必须显式确认，并从猫娘工具列表隐藏。"""
+    import importlib.util
+    import sys
+
+    module_name = "plugin.plugins.neko_pawpilot"
+    original = sys.modules.pop(module_name)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            _ROOT / "__init__.py",
+            submodule_search_locations=[str(_ROOT)],
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        meta = module.NekoPawpilotPlugin.action_install_telemetry._plugin_entry
+        assert meta["input_schema"]["required"] == ["confirm"]
+        assert meta["metadata"]["agent_hidden"] is True
+    finally:
+        sys.modules[module_name] = original
 
 
 def test_event_engine_synthetic():
@@ -1102,6 +1134,8 @@ def test_angle_dedupe_and_pacing_config():
 
     try:
         rt = PawpilotRuntime(_Plug(), _cfg())
+        settings_path = tmp / "ui_settings.json"
+        rt._ui_settings_path = lambda: settings_path
         state = rt.pacing_state()
         assert "companion_gap_s" in state and "content_radio_dj" in state
         res = rt.set_pacing({
@@ -1120,6 +1154,7 @@ def test_angle_dedupe_and_pacing_config():
         # 落盘后可被 settings_load 读回
         asyncio.run(rt.settings_save())
         rt2 = PawpilotRuntime(_Plug(), _cfg())
+        rt2._ui_settings_path = lambda: settings_path
         asyncio.run(rt2.settings_load())
         assert rt2.cfg.companion_gap_s == 120.0
         assert rt2.cfg.content_radio_dj is False
@@ -1758,23 +1793,84 @@ def test_telemetry_installer():
     fake = pathlib.Path(__file__).parent / ".tmp_tl_test"
     fake.mkdir(parents=True, exist_ok=True)
     try:
-        # 缺失 → installed
-        r1 = ti.install(str(fake))
+        ti = TelemetryInstaller(backup_dir=fake / "backups")
+        # 未确认 → 不创建任何文件
+        r0 = ti.install(str(fake), confirm=False)
+        assert r0["status"] == "confirm_required"
+        assert not ti.target_path(str(fake)).exists()
+        # 缺失且已确认 → installed
+        r1 = ti.install(str(fake), confirm=True)
         assert r1["status"] == "installed"
         # 一致 → ok
-        r2 = ti.install(str(fake))
+        r2 = ti.install(str(fake), confirm=True)
         assert r2["status"] == "ok"
-        # 版本不符 → updated
+        # 版本不符且未确认 → 不覆盖
         (ti.target_path(str(fake))).write_bytes(b"stale")
-        r3 = ti.install(str(fake))
+        r_pending = ti.install(str(fake), confirm=False)
+        assert r_pending["status"] == "confirm_required"
+        assert ti.target_path(str(fake)).read_bytes() == b"stale"
+        # 版本不符且已确认 → 先备份再 updated
+        r3 = ti.install(str(fake), confirm=True)
         assert r3["status"] == "updated"
         assert ti.installed_ok(str(fake))
+        backup = pathlib.Path(r3["backup"])
+        assert backup.is_file()
+        assert backup.read_bytes() == b"stale"
         # 无捆绑 → no_bundle
         ti2 = TelemetryInstaller()
         ti2._bundled = pathlib.Path(__file__).parent / "no_such_dll.dll"
-        assert ti2.install(str(fake))["status"] == "no_bundle"
+        assert ti2.install(str(fake), confirm=True)["status"] == "no_bundle"
     finally:
         shutil.rmtree(fake, ignore_errors=True)
+
+
+def test_runtime_start_only_inspects_telemetry(monkeypatch, tmp_path):
+    """启动只读检测，不能自动安装或覆盖游戏侧 DLL。"""
+    import asyncio
+    import logging
+
+    from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+
+    class _Plugin(FakePlugin):
+        def __init__(self):
+            super().__init__(tmp_path)
+            self.logger = logging.getLogger("test_pawpilot_status")
+            self.persona = None
+
+    rt = PawpilotRuntime(_Plugin(), PawpilotConfig())
+    target = rt.telemetry_installer.target_path(str(tmp_path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"existing-user-dll")
+    monkeypatch.setattr(
+        rt.telemetry_installer, "detect_game_dir", lambda: str(tmp_path))
+
+    async def _run():
+        status = await rt.start()
+        await rt.shutdown()
+        return status
+
+    status = asyncio.run(_run())
+    assert status["telemetry_install"]["status"] == "update_required"
+    assert target.read_bytes() == b"existing-user-dll"
+
+
+def test_telemetry_backup_failure_never_overwrites(monkeypatch, tmp_path):
+    """备份失败时必须保留原 DLL，不能继续覆盖。"""
+    from plugin.plugins.neko_pawpilot.adapters import telemetry_installer as module
+
+    installer = module.TelemetryInstaller(backup_dir=tmp_path / "backups")
+    target = installer.target_path(str(tmp_path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"user-original")
+
+    def _fail_copy(*args, **kwargs):
+        raise OSError("backup disk unavailable")
+
+    monkeypatch.setattr(module.shutil, "copy2", _fail_copy)
+    result = installer.install(str(tmp_path), confirm=True)
+
+    assert result["status"] == "backup_failed"
+    assert target.read_bytes() == b"user-original"
 
 
 def test_runtime_start_smoke():
@@ -2102,19 +2198,22 @@ def test_distance_marks():
     assert marks == [4, 2, 1], f"8km 短途也应触发 4/2/1，实际 {marks}"
 
 
-def test_settings_persistence():
+def test_settings_persistence(tmp_path):
     """面板设置（dry_run/频率/类别）保存后可恢复。"""
     import asyncio
 
     from plugin.plugins.neko_pawpilot.core.runtime import PawpilotRuntime
+    settings_path = tmp_path / "ui_settings.json"
 
     async def _run():
         rt = PawpilotRuntime(_FakePluginForRt(), PawpilotConfig())
+        rt._ui_settings_path = lambda: settings_path
         rt.set_dry_run(False)
         rt.set_frequency("active")
         rt.set_category("chatter", True)
         await rt.settings_save()
         rt2 = PawpilotRuntime(_FakePluginForRt(), PawpilotConfig())
+        rt2._ui_settings_path = lambda: settings_path
         rt2.memory._kv = rt.memory._kv
         await rt2.settings_load()
         return rt2

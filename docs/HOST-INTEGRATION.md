@@ -14,8 +14,8 @@
 |---|---|---|---|---|---|
 | 宿主记忆/对话写入 | 无 | 插件记忆可独立存储 | 未使用 | 只写插件数据目录和 Store，不写宿主记忆库 | 无需回滚 |
 | 猫娘回复/隐藏上下文 | `neko_arcade`、`neko_fishpower`、`neko_pawpilot`、`neko_pbz`、`neko_terraria` | 回复必须由宿主当前人设生成 | 按功能需要调用 | 只走官方 `push_message`；不写角色记忆卡 | 开启 dry-run、关闭插件或关闭推送 |
-| 代理 DLL / UE4SS | `neko_pbz` 使用代理 DLL/UE4SS；`neko_pawpilot` 使用独立遥测 DLL | PBZ 读取游戏状态；欧卡需要 SCS 遥测 | **遥测 DLL 非默认关闭**：`Runtime.start()` 会检测游戏目录并自动安装/覆盖；代码默认 `dry_run=true`，但随包 `ui_settings.json` 当前为 `false` 并会覆盖默认 | 安装遥测 DLL 当前没有独立确认，旧 DLL 也无自动备份；键鼠接管仍需提议后 `pilot_accept` | 关闭游戏，删除本插件写入的 `scs-telemetry.dll`；被覆盖的旧文件需用户备份恢复 |
-| 键鼠输入注入 | 仅 `neko_pawpilot` | 用户明确同意后接力转向、油门和刹车 | **不能标为默认关闭**：打包配置会关闭 dry-run；真正接管仍需用户同意 | `dry_run` 下绝不注入；玩家抢控、超速、低油、偏离、无路点或市区自动交还；错误配置应改为安全值 | UI 急停/收回驾驶权，设置 `dry_run=true` 或停用插件 |
+| 代理 DLL / UE4SS | `neko_pbz` 使用代理 DLL/UE4SS；`neko_pawpilot` 使用独立遥测 DLL | PBZ 读取游戏状态；欧卡需要 SCS 遥测 | **遥测 DLL 默认不写入**：启动只检查状态，面板点击并确认后才安装/更新；随包 `ui_settings.json` 已为 `dry_run=true` | 覆盖不同版本前先备份到 `data/telemetry_backups` 并校验 SHA-256，备份失败则停止；安装入口要求 `confirm=true` | 关闭游戏，用备份恢复旧 DLL，或删除本插件写入的 `scs-telemetry.dll` |
+| 键鼠输入注入 | 仅 `neko_pawpilot` | 用户明确同意后接力转向、油门和刹车 | **默认关闭实际注入**：代码和随包配置均为 `dry_run=true` | 真正接管仍需提议后 `pilot_accept`；玩家抢控、超速、低油、偏离、无路点或市区自动交还 | UI 急停/收回驾驶权，设置 `dry_run=true` 或停用插件 |
 | 启动游戏进程 | 仅 `neko_terraria` | 拉起用户主动连接的 AI 游戏客户端 | `neko_pawpilot` 未使用 | 猫爪副驾不启动游戏进程 | 不适用 |
 | 屏幕截图 | `neko_pbz`、`neko_fishpower`、`neko_pawpilot`、`neko_terraria` | 游戏视觉侦察或 HUD OCR | 自动识屏在目标游戏前台时运行；手动拍照按用户操作运行 | 只读目标游戏客户区，不持续录屏、不上传第三方 | 关闭识屏或停用插件 |
 | 私有照片/文件读写 | `neko_arcade`、`neko_pawpilot` 保存照片；六个插件均有各自的数据目录 | 相册、地图缓存、设置和日志必须持久化 | 仅用户拍照或运行功能时写入 | 照片只进插件 `data_path("photos")`，不扫描私人相册，不写宿主记忆库 | 删除插件 `photos`/数据目录 |
@@ -40,10 +40,19 @@
 `bin/win_x64/plugins/`。这是游戏官方插件目录中的遥测 DLL，不是代理注入 DLL。
 安装前应关闭游戏，并校验文件 SHA-256。
 
-当前 `Runtime.start()` 会自动调用安装器，因此**不能宣称该 DLL 默认关闭或必须
-先由用户确认**。目标文件版本不同时会被直接覆盖，且安装器还没有自动备份。
-后续版本应把自动安装改为显式授权动作，并在覆盖前备份原文件。当前回滚时必须
-删除本插件安装的文件；如果安装前已有原文件，应由用户备份恢复。
+当前 `Runtime.start()` 只调用只读 `status()`，不会创建目录、复制或覆盖 DLL。
+用户必须在面板点击“导入遥测文件”并确认；该入口从猫娘工具列表隐藏，同时要求
+`confirm=true`：
+
+1. 目标 DLL 不存在：写入捆绑版本。
+2. 目标 DLL 与捆绑版本一致：不写文件。
+3. 目标 DLL 版本不同：先复制到插件
+   `data/telemetry_backups/scs-telemetry.dll.<时间戳>.bak`，校验 SHA-256 后再
+   原子替换；备份失败则停止，不覆盖原文件。
+4. 游戏占用或权限不足：返回失败，并保留备份和原文件。
+
+回滚时关闭游戏与 N.E.K.O，将最近一次 `.bak` 恢复为
+`bin/win_x64/plugins/scs-telemetry.dll`，或删除本插件安装的文件。
 
 ### 接力驾驶
 
@@ -100,24 +109,23 @@
 | `NET_LOOPBACK_TCP` | SCS 遥测 | 本机 telemetry TCP 服务 | 未连接时 NO_GAME |
 | `REGISTRY_READ` | Steam 路径 | HKCU/HKLM `Software\Valve\Steam` | 未找到要求手动填目录 |
 | `FS_GAME_DIR_READ` | 游戏目录探测 | `base_map.scs`、插件目录 | 无目录时禁用 |
-| `FS_GAME_DIR_WRITE` | 安装遥测 DLL | `bin/win_x64/plugins/scs-telemetry.dll` | 游戏占用/权限不足时失败 |
-| `NATIVE_TELEMETRY_DLL` | 原生遥测模块 | 随包 `scs-telemetry.dll` | 不安装时无遥测 |
+| `FS_GAME_DIR_WRITE` | 用户确认后安装遥测 DLL | 覆盖前备份到插件 `telemetry_backups/`，再原子写入 `bin/win_x64/plugins/scs-telemetry.dll` | 未确认、备份失败或游戏占用时不写 |
+| `NATIVE_TELEMETRY_DLL` | 原生遥测模块 | 随包 `scs-telemetry.dll` | 不确认安装时无遥测 |
 | `SCREEN_CAPTURE` | 游戏画面识别 | GDI `BitBlt` / mss / Pillow，仅游戏客户区 | 非前台时跳过 |
 | `HOST_OCR` | 画面文字识别 | 宿主共享 RapidOCR | 不可用时关闭识屏 |
 | `FS_PHOTO_WRITE` | 美景相册 | 插件数据目录 `photos/` | 写失败时只返回错误 |
 | `INPUT_SYNTHETIC` | 接力驾驶 | `pydirectinput` 鼠标/键盘 | 默认 dry-run；用户可随时收回 |
 | `NET_HTTPS_LLM` | 独立 LLM | `httpx` | 未配置时模板/宿主 summary |
 
-当前安装器在覆盖不同版本 DLL 前没有自动备份原文件，这是已确认的权限与安全问题。
-云权限应要求 `fs:game:write`、`native:dll:install`、`input:synthetic`、
-`screen:capture`、`registry:steam:read` 和本地 TCP 接收能力。
+云权限仍应要求 `fs:game:write`、`native:dll:install`、`input:synthetic`、
+`screen:capture`、`registry:steam:read` 和本地 TCP 接收能力；实现层已增加
+用户确认、覆盖前备份、备份校验和原子替换。
 
 红线审计：未发现写宿主记忆库；猫娘发言只通过 `push_message`。最高风险是游戏目录
 写入和键鼠注入，不是宿主记忆写入。
 
-## 待整改
+## 仍需在云权限层落实
 
-1. 遥测 DLL 覆盖前创建原文件备份；
-2. 若已有不同版本 `scs-telemetry.dll`，默认停止并提示用户选择；
-3. 云权限声明必须单独列出输入注入和游戏目录写入。
+1. 市场权限模板必须单独列出输入注入和游戏目录写入；
+2. 安装确认必须保持为当前用户主动操作，不能由后台启动流程代替。
 

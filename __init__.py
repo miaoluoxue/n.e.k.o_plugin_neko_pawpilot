@@ -393,15 +393,28 @@ class NekoPawpilotPlugin(NekoPluginBase):
     @plugin_entry(
         id="install_telemetry",
         name="导入遥测文件",
-        description="把捆绑的 scs-telemetry.dll 写入游戏 bin/win_x64/plugins/ 目录（需要游戏未运行）。玩家说装遥测/装插件/写入遥测时调用。",
-        input_schema={"type": "object", "properties": {}},
+        description="用户明确确认后，把捆绑的 scs-telemetry.dll 写入游戏插件目录；覆盖不同版本前先备份原文件。需要游戏未运行。",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "confirm": {
+                    "type": "boolean",
+                    "description": "必须由用户明确确认安装/覆盖并接受备份位置。",
+                    "default": False,
+                },
+            },
+            "required": ["confirm"],
+        },
+        metadata={"agent_hidden": True},
     )
-    async def action_install_telemetry(self, **_) -> Any:
-        """手动导入遥测 DLL 到游戏目录。"""
+    async def action_install_telemetry(self, confirm: bool = False, **_) -> Any:
+        """用户确认后导入遥测 DLL 到游戏目录。"""
         try:
             if not self.rt:
                 return Err(SdkError("猫爪副驾还没准备好喵"))
-            result = self.rt.install_telemetry()
+            if not confirm:
+                return Err(SdkError("安装遥测 DLL 需要用户明确确认"))
+            result = self.rt.install_telemetry(confirm=True)
             return Ok(result)
         except Exception as exc:
             self.logger.warning("install_telemetry failed: %s", exc)
