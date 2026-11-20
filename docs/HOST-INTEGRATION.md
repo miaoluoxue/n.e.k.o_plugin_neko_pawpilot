@@ -66,3 +66,39 @@
 - 删除游戏 `plugins` 目录中本插件安装的遥测 DLL；
 - 删除插件 `photos` 与设置文件。
 
+## 完整权限清单
+
+权限 ID 仅用于后续映射云玩家模板，不代表当前 SDK 已声明这些字段。
+
+| 审计 ID | 权限 | 实际 API/资源 | 降级 |
+|---|---|---|---|
+| `HOST_LIFECYCLE` | 启停 | `@lifecycle` | 停止遥测、识屏和控制 |
+| `HOST_ENTRY_UI` | 面板入口 | `@plugin_entry`、`@ui.action` | 面板关闭后主动播报仍可存在 |
+| `HOST_PUSH_RESPOND` | 事实注入并触发回复 | `push_message(ai_behavior="respond")` | dry-run/模板降级 |
+| `HOST_DATA_PATH` | 数据目录 | `plugin.data_path()` | 不可写时禁用相册/设置 |
+| `HOST_PERSONA_READ` | 猫娘人设 | 宿主 `config/characters.json` 等路径 | 默认人设 |
+| `HOST_CTX_PRIVATE` | 目标角色解析 | `ctx._current_lanlan`、`ctx._host_ctx` | 单角色 fallback |
+| `NET_LOOPBACK_TCP` | SCS 遥测 | 本机 telemetry TCP 服务 | 未连接时 NO_GAME |
+| `REGISTRY_READ` | Steam 路径 | HKCU/HKLM `Software\Valve\Steam` | 未找到要求手动填目录 |
+| `FS_GAME_DIR_READ` | 游戏目录探测 | `base_map.scs`、插件目录 | 无目录时禁用 |
+| `FS_GAME_DIR_WRITE` | 安装遥测 DLL | `bin/win_x64/plugins/scs-telemetry.dll` | 游戏占用/权限不足时失败 |
+| `NATIVE_TELEMETRY_DLL` | 原生遥测模块 | 随包 `scs-telemetry.dll` | 不安装时无遥测 |
+| `SCREEN_CAPTURE` | 游戏画面识别 | GDI `BitBlt` / mss / Pillow，仅游戏客户区 | 非前台时跳过 |
+| `HOST_OCR` | 画面文字识别 | 宿主共享 RapidOCR | 不可用时关闭识屏 |
+| `FS_PHOTO_WRITE` | 美景相册 | 插件数据目录 `photos/` | 写失败时只返回错误 |
+| `INPUT_SYNTHETIC` | 接力驾驶 | `pydirectinput` 鼠标/键盘 | 默认 dry-run；用户可随时收回 |
+| `NET_HTTPS_LLM` | 独立 LLM | `httpx` | 未配置时模板/宿主 summary |
+
+当前安装器在覆盖不同版本 DLL 前没有自动备份原文件，这是已确认的权限与安全问题。
+云权限应要求 `fs:game:write`、`native:dll:install`、`input:synthetic`、
+`screen:capture`、`registry:steam:read` 和本地 TCP 接收能力。
+
+红线审计：未发现写宿主记忆库；猫娘发言只通过 `push_message`。最高风险是游戏目录
+写入和键鼠注入，不是宿主记忆写入。
+
+## 待整改
+
+1. 遥测 DLL 覆盖前创建原文件备份；
+2. 若已有不同版本 `scs-telemetry.dll`，默认停止并提示用户选择；
+3. 云权限声明必须单独列出输入注入和游戏目录写入。
+
